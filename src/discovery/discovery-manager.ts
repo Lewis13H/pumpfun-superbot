@@ -1,8 +1,10 @@
+// src/discovery/discovery-manager.ts
 import { EventEmitter } from 'events';
 import { logger } from '../utils/logger';
 import { BaseMonitor, TokenDiscovery } from './base-monitor';
 import { db } from '../database/postgres';
 import { writeDiscoveryEvent } from '../database/questdb';
+import { AddressValidator } from '../utils/address-validator';
 
 export class DiscoveryManager extends EventEmitter {
   private monitors: Map<string, BaseMonitor> = new Map();
@@ -11,6 +13,7 @@ export class DiscoveryManager extends EventEmitter {
     totalDiscovered: 0,
     duplicatesFound: 0,
     errorsEncountered: 0,
+    invalidAddresses: 0,
   };
 
   async initialize(): Promise<void> {
@@ -85,41 +88,49 @@ export class DiscoveryManager extends EventEmitter {
   }
 
   private async handleTokenDiscovery(token: TokenDiscovery): Promise<void> {
+    // Validate and sanitize token data
+    const sanitizedToken = AddressValidator.sanitizeTokenData(token);
+    
+    if (!sanitizedToken) {
+      this.stats.invalidAddresses++;
+      return;
+    }
+
     // Check for duplicates
-    if (this.discoveredTokens.has(token.address)) {
+    if (this.discoveredTokens.has(sanitizedToken.address)) {
       this.stats.duplicatesFound++;
-      logger.debug(`Duplicate token found: ${token.address}`);
+      logger.debug(`Duplicate token found: ${sanitizedToken.address}`);
       return;
     }
 
     // Mark as discovered
-    this.discoveredTokens.add(token.address);
+    this.discoveredTokens.add(sanitizedToken.address);
     this.stats.totalDiscovered++;
 
     // Store in database
     try {
       await db('tokens').insert({
-        address: token.address,
-        symbol: token.symbol,
-        name: token.name,
-        platform: token.platform,
-        created_at: token.createdAt,
+        address: sanitizedToken.address,
+        symbol: sanitizedToken.symbol,
+        name: sanitizedToken.name,
+        platform: sanitizedToken.platform,
+        created_at: sanitizedToken.createdAt,
         discovered_at: new Date(),
-        raw_data: JSON.stringify(token.metadata || {}),
+        raw_data: JSON.stringify(sanitizedToken.metadata || {}),
       }).onConflict('address').ignore();
 
       // Write to QuestDB
       await writeDiscoveryEvent({
-        tokenAddress: token.address,
-        platform: token.platform,
+        tokenAddress: sanitizedToken.address,
+        platform: sanitizedToken.platform,
         eventType: 'discovered',
-        details: `${token.symbol} - ${token.name}`,
+        details: `${sanitizedToken.symbol} - ${sanitizedToken.name}`,
       });
 
       // Emit for further processing
-      this.emit('tokenDiscovered', token);
+      this.emit('tokenDiscovered', sanitizedToken);
       
-      logger.info(`New token discovered: ${token.symbol} (${token.address}) on ${token.platform}`);
+      logger.info(`New token discovered: ${sanitizedToken.symbol} (${sanitizedToken.address}) on ${sanitizedToken.platform}`);
     } catch (error) {
       logger.error('Failed to save discovered token:', error);
       this.stats.errorsEncountered++;

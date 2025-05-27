@@ -1,30 +1,32 @@
-// src/discovery/discovery-service.ts
-import { EventEmitter } from 'events';
+// Update src/discovery/discovery-service.ts
 import { DiscoveryManager } from './discovery-manager';
 import { TokenProcessor } from './token-processor';
 import { DeduplicationService } from './deduplication-service';
 import { PumpFunMonitor } from './pumpfun-monitor';
 import { RaydiumMonitor } from './raydium-monitor';
+import { AnalysisPipeline } from '../analysis/analysis-pipeline';
 import { logger } from '../utils/logger';
 
-export class DiscoveryService extends EventEmitter {
+export class DiscoveryService {
   private discoveryManager: DiscoveryManager;
   private tokenProcessor: TokenProcessor;
   private deduplicationService: DeduplicationService;
+  private analysisPipeline: AnalysisPipeline;
   private isRunning: boolean = false;
 
   constructor() {
-    super();
     this.discoveryManager = new DiscoveryManager();
     this.tokenProcessor = new TokenProcessor();
     this.deduplicationService = new DeduplicationService();
+    this.analysisPipeline = new AnalysisPipeline();
   }
 
   async initialize(): Promise<void> {
     logger.info('Initializing Discovery Service');
 
-    // Initialize discovery manager
+    // Initialize components
     await this.discoveryManager.initialize();
+    await this.analysisPipeline.initialize();
 
     // Set up event handlers
     this.setupEventHandlers();
@@ -52,16 +54,22 @@ export class DiscoveryService extends EventEmitter {
       await this.tokenProcessor.addToken(token, priority);
     });
 
-    // Handle processed tokens - emit to parent service
-    this.tokenProcessor.on('tokenReady', (token) => {
+    // Handle processed tokens - send to analysis
+    this.tokenProcessor.on('tokenReady', async (token) => {
       logger.info(`Token ready for analysis: ${token.symbol} (${token.address})`);
-      // Emit the event so the analysis service can pick it up
-      this.emit('tokenReady', token);
+      
+      // Send to analysis pipeline
+      await this.analysisPipeline.analyzeToken(token.address);
     });
 
     // Handle failed tokens
     this.tokenProcessor.on('tokenFailed', (token, error) => {
       logger.error(`Token processing failed: ${token.address}`, error);
+    });
+
+    // Handle completed analysis
+    this.analysisPipeline.on('analysisCompleted', (result) => {
+      logger.info(`Analysis completed: ${result.address} - ${result.classification} (Score: ${result.scores.composite})`);
     });
   }
 
@@ -98,6 +106,9 @@ export class DiscoveryService extends EventEmitter {
 
     // Start all monitors
     await this.discoveryManager.startAll();
+    
+    // Analyze any pending tokens
+    await this.analysisPipeline.analyzePendingTokens();
 
     logger.info('Discovery Service started successfully');
   }
@@ -129,6 +140,7 @@ export class DiscoveryService extends EventEmitter {
       discovery: this.discoveryManager.getStats(),
       processing: this.tokenProcessor.getStats(),
       deduplication: this.deduplicationService.getStats(),
+      analysis: this.analysisPipeline.getStats(),
     };
   }
 }

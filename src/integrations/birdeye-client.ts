@@ -1,251 +1,300 @@
-// src/integrations/birdeye-client.ts
 import { BaseAPIClient } from './base-api-client';
-import { BirdeyeTokenOverview, BirdeyeHolderInfo, TokenMetadata, TokenMarketData } from './types';
-import { config } from '../config';
+import { 
+  TokenData, 
+  MarketData, 
+  HolderData, 
+  LiquidityData, 
+  SecurityData 
+} from './types';
 import { logger } from '../utils/logger';
+import { config } from '../config';
+
+interface BirdeyeTokenOverview {
+  address: string;
+  decimals: number;
+  symbol: string;
+  name: string;
+  logoURI?: string;
+  supply: number;
+  v24hUSD: number;
+  v24hChangePercent: number;
+  mc: number;
+  price: number;
+  lastTradeUnixTime: number;
+  holder?: number;
+}
+
+interface BirdeyeTokenSecurity {
+  ownerAddress?: string;
+  creatorAddress?: string;
+  freezeAuthority?: string;
+  mintAuthority?: string;
+  ownerBalance?: number;
+  ownerPercentage?: number;
+  creatorBalance?: number;
+  creatorPercentage?: number;
+  top10HolderBalance?: number;
+  top10HolderPercent?: number;
+}
+
+interface BirdeyePrice {
+  value: number;
+  updateUnixTime: number;
+  updateHumanTime: string;
+}
 
 export class BirdeyeClient extends BaseAPIClient {
   constructor() {
-    super(
-      'Birdeye',
-      'https://public-api.birdeye.so',
-      {
-        maxRequests: 50, // Birdeye allows 50 requests per minute
-        windowMs: 60000,
-        retryAfter: 60000,
+    super('birdeye', {
+      baseURL: 'https://public-api.birdeye.so',
+      apiKey: config.apis.birdeyeApiKey,
+      timeout: 15000,
+      rateLimit: {
+        maxRequests: 60, // Birdeye free tier
+        windowMs: 60000, // 1 minute
       },
-      {
-        headers: {
-          'X-API-KEY': config.apis.birdeyeApiKey,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    });
   }
 
-  async getTokenOverview(tokenAddress: string): Promise<BirdeyeTokenOverview | null> {
+  async getTokenData(address: string): Promise<TokenData | null> {
     try {
-      logger.debug(`Fetching Birdeye overview for ${tokenAddress}`);
+      logger.debug(`Fetching Birdeye data for ${address}`);
       
-      const response = await this.makeRequest<{ data: BirdeyeTokenOverview }>({
-        method: 'GET',
-        url: '/defi/token_overview',
-        params: {
-          address: tokenAddress,
-        },
-      });
+      // Get token overview
+      const overview = await this.get<{ data: BirdeyeTokenOverview }>(
+        '/defi/token_overview',
+        { params: { address } }
+      );
 
-      if (!response?.data) {
-        logger.warn(`No Birdeye data found for ${tokenAddress}`);
+      if (!overview.data) {
+        logger.debug(`No Birdeye data found for ${address}`);
         return null;
       }
 
-      logger.info(`Birdeye overview retrieved for ${tokenAddress}`, {
-        symbol: response.data.symbol,
-        price: response.data.price,
-        marketCap: response.data.marketCap,
-      });
+      const token = overview.data;
 
-      return response.data;
+      const tokenData: TokenData = {
+        address,
+        symbol: token.symbol || 'UNKNOWN',
+        name: token.name || 'Unknown Token',
+        price: token.price || 0,
+        marketCap: token.mc || 0,
+        volume24h: token.v24hUSD || 0,
+        liquidity: 0, // Need to fetch separately
+        holders: token.holder || 0,
+        priceChange24h: token.v24hChangePercent || 0,
+        
+        // Additional Birdeye specific data
+        decimals: token.decimals,
+        supply: token.supply,
+        logoURI: token.logoURI,
+        lastTradeTime: token.lastTradeUnixTime ? new Date(token.lastTradeUnixTime * 1000) : undefined,
+      };
+
+      logger.info(`Birdeye data fetched for ${tokenData.symbol}: ${tokenData.price}`);
+      return tokenData;
     } catch (error: any) {
-      logger.error(`Birdeye API error for ${tokenAddress}:`, {
-        message: error.message,
-        status: error.response?.status,
-      });
+      if (error.response?.status === 404) {
+        logger.debug(`Token ${address} not found on Birdeye`);
+        return null;
+      }
+      logger.error(`Birdeye API error for ${address}:`, error.message);
+      throw error;
+    }
+  }
+
+  async getMarketData(address: string): Promise<MarketData | null> {
+    try {
+      // Get price history for high/low
+      const priceHistory = await this.get<{ data: { items: BirdeyePrice[] } }>(
+        '/defi/history_price',
+        { 
+          params: { 
+            address,
+            address_type: 'token',
+            type: '1D', // Changed from '24h' to '1D'
+          } 
+        }
+      );
+
+      const tokenData = await this.getTokenData(address);
+      if (!tokenData) return null;
+
+      const prices = priceHistory.data?.items?.map(p => p.value) || [];
+      const high24h = prices.length > 0 ? Math.max(...prices) : tokenData.price;
+      const low24h = prices.length > 0 ? Math.min(...prices) : tokenData.price;
+
+      return {
+        price: tokenData.price,
+        marketCap: tokenData.marketCap,
+        volume24h: tokenData.volume24h,
+        volume1h: 0, // Would need different endpoint
+        priceChange24h: tokenData.priceChange24h || 0,
+        priceChange1h: 0,
+        high24h,
+        low24h,
+      };
+    } catch (error) {
+      logger.error('Error fetching Birdeye market data:', error);
       return null;
     }
   }
 
-  async getTokenHolders(
-    tokenAddress: string,
-    limit: number = 100
-  ): Promise<BirdeyeHolderInfo[]> {
+  async getHolderData(address: string): Promise<HolderData | null> {
     try {
-      logger.debug(`Fetching Birdeye holders for ${tokenAddress}`);
-      
-      const response = await this.makeRequest<{
-        data: {
-          items: BirdeyeHolderInfo[];
-          total: number;
-        };
-      }>({
-        method: 'GET',
-        url: '/defi/token_holder',
-        params: {
-          address: tokenAddress,
-          limit,
-          offset: 0,
-        },
-      });
+      // Get token security info which includes holder data
+      const security = await this.get<{ data: BirdeyeTokenSecurity }>(
+        '/defi/token_security',
+        { params: { address } }
+      );
 
-      if (!response?.data?.items) {
-        logger.warn(`No holder data found for ${tokenAddress}`);
-        return [];
+      if (!security.data) return null;
+
+      const tokenData = await this.getTokenData(address);
+      const totalHolders = tokenData?.holders || 0;
+
+      return {
+        totalHolders,
+        top10Percentage: security.data.top10HolderPercent || 0,
+        topHolders: [
+          {
+            address: security.data.ownerAddress || '',
+            balance: security.data.ownerBalance || 0,
+            percentage: security.data.ownerPercentage || 0,
+            rank: 1,
+            isCreator: false,
+            isOwner: true,
+          },
+          {
+            address: security.data.creatorAddress || '',
+            balance: security.data.creatorBalance || 0,
+            percentage: security.data.creatorPercentage || 0,
+            rank: 2,
+            isCreator: true,
+            isOwner: false,
+          },
+        ].filter(h => h.address !== ''),
+        concentration: this.calculateConcentration(security.data.top10HolderPercent || 0),
+      };
+    } catch (error) {
+      logger.error('Error fetching Birdeye holder data:', error);
+      return null;
+    }
+  }
+
+  async getSecurityData(address: string): Promise<SecurityData | null> {
+    try {
+      const security = await this.get<{ data: BirdeyeTokenSecurity }>(
+        '/defi/token_security',
+        { params: { address } }
+      );
+
+      if (!security.data) return null;
+
+      const hasMintAuth = !!security.data.mintAuthority && 
+                          security.data.mintAuthority !== '11111111111111111111111111111111';
+      const hasFreezeAuth = !!security.data.freezeAuthority && 
+                            security.data.freezeAuthority !== '11111111111111111111111111111111';
+
+      return {
+        rugPullRisk: this.calculateRugPullRisk(security.data),
+        honeypotRisk: false, // Birdeye doesn't provide this directly
+        mintable: hasMintAuth,
+        freezable: hasFreezeAuth,
+        lpBurned: null, // Not provided by Birdeye
+        topHolderConcentration: security.data.top10HolderPercent || 0,
+        isVerified: false, // Would need different endpoint
+        hasWebsite: false,
+        hasSocials: false,
+        contractVerified: false,
+        
+        // Additional security context
+        ownerAddress: security.data.ownerAddress,
+        creatorAddress: security.data.creatorAddress,
+        mintAuthority: security.data.mintAuthority,
+        freezeAuthority: security.data.freezeAuthority,
+      };
+    } catch (error) {
+      logger.error('Error fetching Birdeye security data:', error);
+      return null;
+    }
+  }
+
+  async getLiquidityData(address: string): Promise<LiquidityData | null> {
+    try {
+      // Get pool info
+      const pools = await this.get<{ data: { pools: any[] } }>(
+        '/defi/token_pools',
+        { params: { address } }
+      );
+
+      if (!pools.data?.pools || pools.data.pools.length === 0) {
+        return null;
       }
 
-      logger.info(`Retrieved ${response.data.items.length} holders for ${tokenAddress}`);
-      return response.data.items;
-    } catch (error: any) {
-      logger.error(`Birdeye holders API error for ${tokenAddress}:`, {
-        message: error.message,
-        status: error.response?.status,
-      });
-      return [];
-    }
-  }
+      const sortedPools = pools.data.pools.sort((a, b) => 
+        (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
+      );
 
-  async getTokenSecurity(tokenAddress: string): Promise<{
-    freezeable: boolean;
-    mintable: boolean;
-    mutableMetadata: boolean;
-    transferFeeEnable: boolean;
-  } | null> {
-    try {
-      const response = await this.makeRequest<{
-        data: {
-          freezeable: boolean;
-          mintable: boolean;
-          mutableMetadata: boolean;
-          transferFeeEnable: boolean;
-        };
-      }>({
-        method: 'GET',
-        url: '/defi/token_security',
-        params: {
-          address: tokenAddress,
+      const totalLiquidity = sortedPools.reduce((sum, pool) => 
+        sum + (pool.liquidity?.usd || 0), 0
+      );
+
+      const mainPool = sortedPools[0];
+
+      return {
+        totalLiquidityUSD: totalLiquidity,
+        poolCount: sortedPools.length,
+        mainPool: {
+          address: mainPool.address,
+          dex: mainPool.source || 'unknown',
+          liquidityUSD: mainPool.liquidity?.usd || 0,
+          volume24h: mainPool.volume?.h24 || 0,
         },
-      });
-
-      return response?.data || null;
+        pools: sortedPools.slice(0, 5).map(pool => ({
+          address: pool.address,
+          dex: pool.source,
+          liquidityUSD: pool.liquidity?.usd || 0,
+          volume24h: pool.volume?.h24 || 0,
+        })),
+      };
     } catch (error: any) {
-      logger.error(`Birdeye security API error for ${tokenAddress}:`, {
-        message: error.message,
-      });
+      if (error.response?.status === 404) {
+        logger.debug(`No liquidity data found for ${address} on Birdeye`);
+        return null;
+      }
+      logger.error('Error fetching Birdeye liquidity data:', error);
       return null;
     }
   }
 
-  async getTokenPriceHistory(
-    tokenAddress: string,
-    timeframe: 'h' | 'd' | 'w' | 'm' = 'd',
-    limit: number = 30
-  ): Promise<Array<{ timestamp: number; value: number }> | null> {
-    try {
-      const response = await this.makeRequest<{
-        data: {
-          items: Array<{
-            unixTime: number;
-            value: number;
-          }>;
-        };
-      }>({
-        method: 'GET',
-        url: '/defi/history_price',
-        params: {
-          address: tokenAddress,
-          address_type: 'token',
-          type: timeframe,
-          limit,
-        },
-      });
+  private calculateConcentration(top10Percent: number): 'low' | 'medium' | 'high' | 'extreme' {
+    if (top10Percent < 30) return 'low';
+    if (top10Percent < 50) return 'medium';
+    if (top10Percent < 80) return 'high';
+    return 'extreme';
+  }
 
-      if (!response?.data?.items) return null;
+  private calculateRugPullRisk(security: BirdeyeTokenSecurity): number {
+    let risk = 0;
 
-      return response.data.items.map(item => ({
-        timestamp: item.unixTime * 1000,
-        value: item.value,
-      }));
-    } catch (error: any) {
-      logger.error(`Birdeye price history error for ${tokenAddress}:`, {
-        message: error.message,
-      });
-      return null;
+    // High owner/creator balance
+    if ((security.ownerPercentage || 0) > 20) risk += 0.3;
+    if ((security.creatorPercentage || 0) > 20) risk += 0.3;
+    
+    // Mint authority not revoked
+    if (security.mintAuthority && security.mintAuthority !== '11111111111111111111111111111111') {
+      risk += 0.2;
     }
-  }
-
-  async getTokenVolumeHistory(
-    tokenAddress: string,
-    timeframe: 'h' | 'd' | 'w' | 'm' = 'd',
-    limit: number = 30
-  ): Promise<Array<{ timestamp: number; value: number }> | null> {
-    try {
-      const response = await this.makeRequest<{
-        data: {
-          items: Array<{
-            unixTime: number;
-            value: number;
-          }>;
-        };
-      }>({
-        method: 'GET',
-        url: '/defi/history_volume',
-        params: {
-          address: tokenAddress,
-          address_type: 'token',
-          type: timeframe,
-          limit,
-        },
-      });
-
-      if (!response?.data?.items) return null;
-
-      return response.data.items.map(item => ({
-        timestamp: item.unixTime * 1000,
-        value: item.value,
-      }));
-    } catch (error: any) {
-      logger.error(`Birdeye volume history error for ${tokenAddress}:`, {
-        message: error.message,
-      });
-      return null;
+    
+    // Freeze authority not revoked
+    if (security.freezeAuthority && security.freezeAuthority !== '11111111111111111111111111111111') {
+      risk += 0.1;
     }
-  }
+    
+    // High concentration
+    if ((security.top10HolderPercent || 0) > 80) risk += 0.1;
 
-  // Helper method to convert Birdeye data to our standard format
-  convertToTokenMetadata(data: BirdeyeTokenOverview): TokenMetadata {
-    return {
-      address: data.address,
-      symbol: data.symbol,
-      name: data.name,
-      decimals: data.decimals,
-      totalSupply: data.supply,
-      image: data.logoURI,
-    };
-  }
-
-  convertToMarketData(data: BirdeyeTokenOverview): TokenMarketData {
-    return {
-      price: {
-        usd: data.price,
-        change24h: data.priceChange24h,
-      },
-      marketCap: data.marketCap,
-      volume24h: data.volume24h,
-      liquidity: data.liquidity,
-      holders: data.holder,
-    };
-  }
-
-  // Get comprehensive token data
-  async getComprehensiveTokenData(tokenAddress: string): Promise<{
-    overview: BirdeyeTokenOverview | null;
-    holders: BirdeyeHolderInfo[];
-    security: any;
-    metadata: TokenMetadata | null;
-    marketData: TokenMarketData | null;
-  }> {
-    const [overview, holders, security] = await Promise.all([
-      this.getTokenOverview(tokenAddress),
-      this.getTokenHolders(tokenAddress),
-      this.getTokenSecurity(tokenAddress),
-    ]);
-
-    return {
-      overview,
-      holders,
-      security,
-      metadata: overview ? this.convertToTokenMetadata(overview) : null,
-      marketData: overview ? this.convertToMarketData(overview) : null,
-    };
+    return Math.min(risk, 1);
   }
 }

@@ -1,4 +1,3 @@
-// src/index.ts
 import { app } from './server';
 import { config } from './config';
 import { logger } from './utils/logger';
@@ -13,35 +12,11 @@ async function bootstrap() {
     
     // Initialize services
     await discoveryService.initialize();
-    await analysisService.initialize();
-    
-    // Set up event handlers between services
-    discoveryService.on('tokenReady', async (token) => {
-      logger.info(`Token ready for analysis: ${token.symbol} (${token.address})`);
-      await analysisService.analyzeToken(token);
-    });
-    
-    analysisService.on('analysisComplete', (analysis) => {
-      logger.info(`Analysis complete for ${analysis.symbol}`, {
-        classification: analysis.classification,
-        scores: analysis.scores,
-      });
-    });
-    
-    analysisService.on('analysisFailed', (token, error) => {
-      logger.error(`Analysis failed for ${token.address}:`, error);
-    });
     
     // Start server
     const server = app.listen(config.port, () => {
       logger.info(`Server running on port ${config.port}`);
       logger.info(`Environment: ${config.env}`);
-      logger.info(`API endpoints available:`);
-      logger.info(`  - Health: http://localhost:${config.port}/health`);
-      logger.info(`  - Discovery: http://localhost:${config.port}/discovery/stats`);
-      logger.info(`  - Analysis: http://localhost:${config.port}/analysis/stats`);
-      logger.info(`  - Tokens: http://localhost:${config.port}/tokens/list`);
-      logger.info(`  - API Status: http://localhost:${config.port}/api/integrations/status`);
     });
     
     // Auto-start services if in development
@@ -50,35 +25,34 @@ async function bootstrap() {
         logger.info('Auto-starting discovery and analysis services...');
         await discoveryService.start();
         await analysisService.start();
-      }, 15000);
+      }, 5000);
     }
     
     // Graceful shutdown
-    process.on('SIGTERM', async () => {
-      logger.info('SIGTERM received, shutting down gracefully...');
-      
-      await discoveryService.stop();
-      await analysisService.stop();
-      
-      server.close(async () => {
-        await db.destroy();
-        await closeQuestDB();
-        process.exit(0);
-      });
-    });
+    process.on('SIGTERM', handleShutdown);
+    process.on('SIGINT', handleShutdown);
     
-    process.on('SIGINT', async () => {
-      logger.info('SIGINT received, shutting down gracefully...');
+    async function handleShutdown() {
+      logger.info('Shutdown signal received, shutting down gracefully...');
       
+      // Stop services
       await discoveryService.stop();
       await analysisService.stop();
       
+      // Close server
       server.close(async () => {
         await db.destroy();
         await closeQuestDB();
+        logger.info('Shutdown complete');
         process.exit(0);
       });
-    });
+      
+      // Force exit after 30 seconds
+      setTimeout(() => {
+        logger.error('Forced shutdown after timeout');
+        process.exit(1);
+      }, 30000);
+    }
     
   } catch (error) {
     logger.error('Failed to start application', error);
