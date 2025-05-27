@@ -1,6 +1,6 @@
-// src/api/health.ts
 import { Router } from 'express';
 import { db, testConnection as testPostgres } from '../database/postgres';
+import { getQuestDBSender, closeQuestDB } from '../database/questdb';
 import { logger } from '../utils/logger';
 
 export const healthRouter = Router();
@@ -29,10 +29,19 @@ healthRouter.get('/detailed', async (req, res) => {
     logger.error('PostgreSQL health check failed', error);
   }
   
-  // QuestDB check disabled for now
-  checks.questdb = false;
+  // Check QuestDB
+  try {
+    const sender = await getQuestDBSender();
+    if (sender) {
+      checks.questdb = true;
+      // Don't close the connection here as it might be reused
+    }
+  } catch (error) {
+    logger.error('QuestDB health check failed', error);
+    checks.questdb = false;
+  }
   
-  const allHealthy = checks.postgres;
+  const allHealthy = Object.values(checks).every(status => status === true);
   
   res.status(allHealthy ? 200 : 503).json({
     status: allHealthy ? 'healthy' : 'unhealthy',

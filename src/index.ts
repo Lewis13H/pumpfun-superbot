@@ -4,7 +4,7 @@ import { logger } from './utils/logger';
 import { db } from './database/postgres';
 import { closeQuestDB } from './database/questdb';
 import { discoveryService } from './discovery/discovery-service';
-import { analysisService } from './analysis/analysis-service';
+//import { analysisService } from './analysis/analysis-service';
 
 async function bootstrap() {
   try {
@@ -22,9 +22,9 @@ async function bootstrap() {
     // Auto-start services if in development
     if (config.env === 'development') {
       setTimeout(async () => {
-        logger.info('Auto-starting discovery and analysis services...');
+        logger.info('Auto-starting discovery service...');
         await discoveryService.start();
-        await analysisService.start();
+        // await analysisService.start(); // Will be enabled in Module 2A
       }, 5000);
     }
     
@@ -37,7 +37,7 @@ async function bootstrap() {
       
       // Stop services
       await discoveryService.stop();
-      await analysisService.stop();
+      // await analysisService.stop(); // Will be enabled in Module 2A
       
       // Close server
       server.close(async () => {
