@@ -1,0 +1,27 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: solana_postgres
+    environment:
+      POSTGRES_USER: solana_user
+      POSTGRES_PASSWORD: solana_password
+      POSTGRES_DB: solana_tokens
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  
+  questdb:
+    image: questdb/questdb:7.3.7
+    container_name: solana_questdb
+    ports:
+      - "9000:9000"  # Web Console
+      - "8812:8812"  # PostgreSQL wire protocol
+      - "9009:9009"  # InfluxDB line protocol
+    volumes:
+      - questdb_data:/var/questdb/data
+
+volumes:
+  postgres_data:
+  questdb_data:
