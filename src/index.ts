@@ -4,13 +4,15 @@ import { logger } from './utils/logger';
 import { db } from './database/postgres';
 import { closeQuestDB } from './database/questdb';
 import { discoveryService } from './discovery/discovery-service';
+import { analysisService } from './analysis/analysis-service';
 
 async function bootstrap() {
   try {
     logger.info('Starting Solana Token Discovery System...');
     
-    // Initialize discovery service
+    // Initialize services
     await discoveryService.initialize();
+    await analysisService.initialize();
     
     // Start server
     const server = app.listen(config.port, () => {
@@ -18,11 +20,12 @@ async function bootstrap() {
       logger.info(`Environment: ${config.env}`);
     });
     
-    // Auto-start discovery if in development
+    // Auto-start services if in development
     if (config.env === 'development') {
       setTimeout(async () => {
-        logger.info('Auto-starting discovery service...');
+        logger.info('Auto-starting services...');
         await discoveryService.start();
+        await analysisService.start();
       }, 5000);
     }
     
@@ -30,6 +33,7 @@ async function bootstrap() {
     process.on('SIGTERM', async () => {
       logger.info('SIGTERM received, shutting down gracefully...');
       
+      await analysisService.stop();
       await discoveryService.stop();
       
       server.close(async () => {

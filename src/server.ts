@@ -7,6 +7,7 @@ import { config } from './config';
 import { logger, loggerStream } from './utils/logger';
 import { healthRouter } from './api/health';
 import { discoveryService } from './discovery/discovery-service';
+import { analysisRouter } from './api/analysis';
 
 const app = express();
 
@@ -28,6 +29,7 @@ app.use((req, res, next) => {
 
 // Routes
 app.use('/health', healthRouter);
+app.use('/analysis', analysisRouter);
 
 // Discovery routes
 const discoveryRouter = Router();
