@@ -96,48 +96,46 @@ export class AnalysisService extends EventEmitter {
         // Fetch comprehensive data from APIs
         const tokenData = await apiManager.getComprehensiveTokenData(token.address);
         
-        let scores;
-        let classification: 'HIGH' | 'MODERATE' | 'LOW' | 'AVOID';
-        let analysisData = null;
-
         if (!tokenData) {
           logger.warn(`No API data available for ${token.address}, using basic analysis`);
           // Use basic analysis without API data
-          scores = { safety: 0.5, potential: 0.5, composite: 0.5 };
-          classification = 'MODERATE';
-        } else {
+            scores = { safety: 0.5, potential: 0.5, composite: 0.5 };
+            classification = 'MODERATE';
+            analysisData = null;
+         } else {
           // Normal flow with API data
-          analysisData = tokenData;
-        
-        // Only update if we have valid data
-        if (tokenData.metadata.symbol && tokenData.metadata.symbol !== 'UNKNOWN') {
+            scores = this.calculateScores(tokenData);
+            classification = this.classifyToken(scores);
+            analysisData = tokenData;
+          }
+        // Update token metadata if we got better data
+        if (tokenData.metadata.symbol !== 'UNKNOWN' && tokenData.metadata.name !== 'Unknown Token') {
           await db('tokens')
             .where('address', token.address)
             .update({
               symbol: tokenData.metadata.symbol,
-              name: tokenData.metadata.name || 'Unknown Token',
+              name: tokenData.metadata.name,
             });
-         }
+        }
         
         // Calculate scores
-        scores = this.calculateScores(tokenData);
+        const scores = this.calculateScores(tokenData);
         
         // Determine classification
-        classification = this.classifyToken(scores);
-      }
+        const classification = this.classifyToken(scores);
         
         // Store analysis results
         const analysis: TokenAnalysis = {
           token_address: token.address,
-          symbol: analysisData?.metadata?.symbol || token.symbol || 'UNKNOWN',
-          name: analysisData?.metadata?.name || token.name || 'Unknown Token',
+          symbol: tokenData.metadata.symbol,
+          name: tokenData.metadata.name,
           analysis_data: {
-            metadata: analysisData?.metadata || {},
-            market: analysisData?.marketData || {},
-            security: analysisData?.securityData || {},
-            holders: analysisData?.holderData || {},
-            liquidity: analysisData?.liquidityData || {},
-            social: analysisData?.socialData || {},
+            metadata: tokenData.metadata,
+            market: tokenData.marketData,
+            security: tokenData.securityData,
+            holders: tokenData.holderData,
+            liquidity: tokenData.liquidityData,
+            social: tokenData.socialData,
           },
           scores,
           classification,
@@ -151,10 +149,10 @@ export class AnalysisService extends EventEmitter {
           .where('address', token.address)
           .update({
             analysis_status: 'COMPLETED',
-            market_cap: analysisData?.marketData?.marketCap || 0,
-            price: analysisData?.marketData?.price?.usd || 0,
-            volume_24h: analysisData?.marketData?.volume24h || 0,
-            liquidity: analysisData?.marketData?.liquidity || 0,
+            market_cap: tokenData.marketData.marketCap,
+            price: tokenData.marketData.price.usd,
+            volume_24h: tokenData.marketData.volume24h,
+            liquidity: tokenData.marketData.liquidity,
             safety_score: scores.safety,
             potential_score: scores.potential,
             composite_score: scores.composite,
@@ -165,10 +163,10 @@ export class AnalysisService extends EventEmitter {
         // Write metrics to QuestDB
         await writeTokenMetrics({
           address: token.address,
-          price: analysisData?.marketData?.price?.usd || 0,
-          market_cap: analysisData?.marketData?.marketCap || 0,
-          volume_24h: analysisData?.marketData?.volume24h || 0,
-          holders: analysisData?.holderData?.totalHolders || 0,
+          price: tokenData.marketData.price.usd,
+          market_cap: tokenData.marketData.marketCap,
+          volume_24h: tokenData.marketData.volume24h,
+          holders: tokenData.holderData.totalHolders,
           safety_score: scores.safety,
         });
         
@@ -180,7 +178,7 @@ export class AnalysisService extends EventEmitter {
         const duration = Date.now() - startTime;
         this.updateAverageTime(duration);
         
-        logger.info(`Analysis complete for ${tokenData?.metadata?.symbol || token.symbol || 'UNKNOWN'} (${token.address})`, {
+        logger.info(`Analysis complete for ${tokenData.metadata.symbol} (${token.address})`, {
           duration: `${duration}ms`,
           classification,
           scores,
@@ -235,11 +233,11 @@ export class AnalysisService extends EventEmitter {
     let potential = 0.3; // Base score
     
     // Market factors
-    if (data.marketData.volume24h && data.marketData.volume24h > 100000) potential += 0.2;
-    else if (data.marketData.volume24h && data.marketData.volume24h > 10000) potential += 0.1;
-
-    if (data.marketData.liquidity && data.marketData.liquidity > 50000) potential += 0.2;
-    else if (data.marketData.liquidity && data.marketData.liquidity > 10000) potential += 0.1;
+    if (data.marketData.volume24h > 100000) potential += 0.2;
+    else if (data.marketData.volume24h > 10000) potential += 0.1;
+    
+    if (data.marketData.liquidity > 50000) potential += 0.2;
+    else if (data.marketData.liquidity > 10000) potential += 0.1;
     
     // Price performance
     if (data.marketData.price.change24h) {

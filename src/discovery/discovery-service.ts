@@ -1,3 +1,5 @@
+// src/discovery/discovery-service.ts
+import { EventEmitter } from 'events';
 import { DiscoveryManager } from './discovery-manager';
 import { TokenProcessor } from './token-processor';
 import { DeduplicationService } from './deduplication-service';
@@ -5,13 +7,14 @@ import { PumpFunMonitor } from './pumpfun-monitor';
 import { RaydiumMonitor } from './raydium-monitor';
 import { logger } from '../utils/logger';
 
-export class DiscoveryService {
+export class DiscoveryService extends EventEmitter {
   private discoveryManager: DiscoveryManager;
   private tokenProcessor: TokenProcessor;
   private deduplicationService: DeduplicationService;
   private isRunning: boolean = false;
 
   constructor() {
+    super();
     this.discoveryManager = new DiscoveryManager();
     this.tokenProcessor = new TokenProcessor();
     this.deduplicationService = new DeduplicationService();
@@ -49,10 +52,11 @@ export class DiscoveryService {
       await this.tokenProcessor.addToken(token, priority);
     });
 
-    // Handle processed tokens
+    // Handle processed tokens - emit to parent service
     this.tokenProcessor.on('tokenReady', (token) => {
       logger.info(`Token ready for analysis: ${token.symbol} (${token.address})`);
-      // Module 1C will handle this event
+      // Emit the event so the analysis service can pick it up
+      this.emit('tokenReady', token);
     });
 
     // Handle failed tokens
