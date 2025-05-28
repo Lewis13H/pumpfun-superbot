@@ -560,7 +560,7 @@ export class EnhancedTokenAnalyzer extends EventEmitter {
     }
 
     // Manipulation reasoning
-    if (marketMetrics?.manipulationScore > 0.5) {
+    if (marketMetrics?.manipulationScore && marketMetrics.manipulationScore > 0.5) {
       points.push(`Potential manipulation detected (${(marketMetrics.manipulationScore * 100).toFixed(1)}%)`);
     }
 

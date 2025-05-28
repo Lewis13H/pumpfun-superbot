@@ -1,4 +1,5 @@
 // src/discovery/discovery-service.ts - Updated for Module 2B1
+import { EventEmitter } from 'events';
 import { DiscoveryManager } from './discovery-manager';
 import { TokenProcessor } from './token-processor';
 import { DeduplicationService } from './deduplication-service';
@@ -7,8 +8,9 @@ import { RaydiumMonitor } from './raydium-monitor';
 import { EnhancedTokenAnalyzer } from '../analysis/enhanced-token-analyzer';
 import { MarketMetricsAnalyzer } from '../analysis/market-metrics-analyzer';
 import { logger } from '../utils/logger';
+import { db } from '../database/postgres';
 
-export class DiscoveryService {
+export class DiscoveryService extends EventEmitter {
   private discoveryManager: DiscoveryManager;
   private tokenProcessor: TokenProcessor;
   private deduplicationService: DeduplicationService;
@@ -17,6 +19,7 @@ export class DiscoveryService {
   private isRunning: boolean = false;
 
   constructor() {
+    super();
     this.discoveryManager = new DiscoveryManager();
     this.tokenProcessor = new TokenProcessor();
     this.deduplicationService = new DeduplicationService();
@@ -157,7 +160,7 @@ export class DiscoveryService {
           cost_usd: this.estimateAnalysisCost(analysis),
         };
 
-        await this.db('analysis_performance').insert(performanceData);
+        await db('analysis_performance').insert(performanceData);
       }
     } catch (error) {
       logger.error('Failed to record analysis performance:', error);
@@ -230,7 +233,7 @@ export class DiscoveryService {
         
         // Log performance summary
         logger.info(`📊 Analysis Performance Summary:`);
-        logger.info(`   Tokens Monitored: ${stats.analysis.tokensMonitored}`);
+        logger.info(`   Tokens Monitored: ${stats.marketAnalysis.tokensMonitored}`);
         logger.info(`   Discovery Queue: ${stats.processing.queueSize}`);
         logger.info(`   Deduplication Rate: ${stats.deduplication.totalUnique} unique tokens`);
         
@@ -269,10 +272,10 @@ export class DiscoveryService {
 
   private async getRecentHighPotentialTokens(): Promise<any[]> {
     try {
-      return await this.db('tokens')
+      return await db('tokens')
         .select('symbol', 'name', 'address', 'investment_classification', 'composite_score', 'discovered_at')
         .whereIn('investment_classification', ['HIDDEN_GEM', 'NEW_BURST'])
-        .where('discovered_at', '>', this.db.raw("NOW() - INTERVAL '1 HOUR'"))
+        .where('discovered_at', '>', db.raw("NOW() - INTERVAL '1 HOUR'"))
         .orderBy('composite_score', 'desc')
         .limit(10);
     } catch (error) {
@@ -291,7 +294,7 @@ export class DiscoveryService {
 
   async analyzeSpecificToken(tokenAddress: string): Promise<any> {
     try {
-      const token = await this.db('tokens')
+      const token = await db('tokens')
         .select('*')
         .where('address', tokenAddress)
         .first();
@@ -333,21 +336,6 @@ export class DiscoveryService {
       analysis: this.enhancedAnalyzer.getStats(),
       marketAnalysis: this.marketAnalyzer.getStats(),
     };
-  }
-
-  // EventEmitter methods
-  emit(event: string, ...args: any[]): boolean {
-    return super.emit(event, ...args);
-  }
-
-  on(event: string, listener: (...args: any[]) => void): this {
-    return super.on(event, listener);
-  }
-
-  // Database access (assuming we have access to db)
-  private get db() {
-    // This should be injected or imported properly
-    return require('../database/postgres').db;
   }
 }
 

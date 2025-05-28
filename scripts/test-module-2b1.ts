@@ -262,7 +262,7 @@ class Module2B1Tester {
       const response = await fetch(`${baseUrl}/api`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       
-      const data = await response.json();
+      const data: any = await response.json();
       return `API docs available, version: ${data.version}`;
     });
 
@@ -270,7 +270,7 @@ class Module2B1Tester {
       const response = await fetch(`${baseUrl}/api/market/overview`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       
-      const data = await response.json();
+      const data: any = await response.json();
       return {
         totalTokens: data.token_overview?.total_tokens || 0,
         analyzersRunning: data.analyzer_status?.enhanced_analyzer_running || false,
@@ -281,7 +281,7 @@ class Module2B1Tester {
       const response = await fetch(`${baseUrl}/api/market/top-tokens?limit=5`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       
-      const data = await response.json();
+      const data: any = await response.json();
       return `Retrieved ${data.tokens?.length || 0} tokens`;
     });
 
@@ -289,7 +289,7 @@ class Module2B1Tester {
       const response = await fetch(`${baseUrl}/discovery/stats`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       
-      const data = await response.json();
+      const data: any = await response.json();
       return {
         isRunning: data.isRunning,
         tokensDiscovered: data.discovery?.totalDiscovered || 0,
@@ -301,7 +301,7 @@ class Module2B1Tester {
       const response = await fetch(`${baseUrl}/api/tokens?limit=5`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       
-      const data = await response.json();
+      const data: any = await response.json();
       return `Retrieved ${data.tokens?.length || 0} tokens`;
     });
   }

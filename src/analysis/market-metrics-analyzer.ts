@@ -217,20 +217,19 @@ export class MarketMetricsAnalyzer extends EventEmitter {
 
   private async getDexScreenerData(tokenAddress: string): Promise<any> {
     try {
-      // DexScreener API call (free tier)
       const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`);
       
       if (!response.ok) {
         return null;
       }
 
-      const data = await response.json();
+      const data: any = await response.json();
       
       if (!data.pairs || data.pairs.length === 0) {
         return null;
       }
 
-      const pair = data.pairs[0]; // Use first pair (usually highest volume)
+      const pair = data.pairs[0];
       
       return {
         source: 'dexscreener',
@@ -268,7 +267,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
         return null;
       }
 
-      const data = await response.json();
+      const data: any = await response.json();
       
       return {
         source: 'birdeye',
@@ -300,7 +299,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
         return null;
       }
 
-      const data = await response.json();
+      const data: any = await response.json();
       
       return {
         source: 'helius',
