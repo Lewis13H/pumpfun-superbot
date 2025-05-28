@@ -3,7 +3,7 @@ import { config } from './config';
 import { logger } from './utils/logger';
 import { db } from './database/postgres';
 import { closeQuestDB } from './database/questdb';
-import { discoveryService } from './discovery/discovery-service';
+import { discoveryService } from './discovery/enhanced-discovery-service';
 //import { analysisService } from './analysis/analysis-service';
 
 async function bootstrap() {

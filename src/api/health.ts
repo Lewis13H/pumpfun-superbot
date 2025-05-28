@@ -1,4 +1,3 @@
-// src/api/health.ts
 import { Router } from 'express';
 import { db, testConnection as testPostgres } from '../database/postgres';
 import { logger } from '../utils/logger';
