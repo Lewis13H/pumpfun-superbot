@@ -1,3 +1,4 @@
+// src/server.ts - Updated for Module 2B1
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -7,8 +8,7 @@ import { config } from './config';
 import { logger, loggerStream } from './utils/logger';
 import { healthRouter } from './api/health';
 import { discoveryService } from './discovery/discovery-service';
-import { db } from './database/postgres';
-import { AddressValidator } from './utils/address-validator';
+import marketMetricsRouter, { initializeAnalyzers } from './api/market-metrics';
 
 const app = express();
 
@@ -19,195 +19,464 @@ app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Request logging
+// Request logging with more details for API endpoints
 app.use((req, res, next) => {
+  const start = Date.now();
+  
+  // Log request
   logger.info(`${req.method} ${req.url}`, {
     ip: req.ip,
     userAgent: req.get('user-agent'),
+    contentType: req.get('content-type'),
   });
+  
+  // Log response time
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    logger.info(`${req.method} ${req.url} - ${res.statusCode} (${duration}ms)`);
+  });
+  
   next();
 });
 
 // Routes
 app.use('/health', healthRouter);
 
-// Discovery routes
+// Enhanced Discovery routes
 const discoveryRouter = Router();
 
 discoveryRouter.get('/stats', (req, res) => {
-  res.json(discoveryService.getStats());
+  const stats = discoveryService.getStats();
+  res.json({
+    ...stats,
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
 });
 
 discoveryRouter.post('/start', async (req, res) => {
   try {
     await discoveryService.start();
-    res.json({ status: 'started' });
+    res.json({ 
+      status: 'started',
+      message: 'Discovery service with enhanced analysis started',
+      timestamp: new Date().toISOString(),
+    });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
     logger.error('Failed to start discovery service:', error);
-    res.status(500).json({ error: errorMessage });
+    res.status(500).json({ 
+      error: errorMessage,
+      timestamp: new Date().toISOString(),
+    });
   }
 });
 
 discoveryRouter.post('/stop', async (req, res) => {
   try {
     await discoveryService.stop();
-    res.json({ status: 'stopped' });
+    res.json({ 
+      status: 'stopped',
+      message: 'Discovery service stopped',
+      timestamp: new Date().toISOString(),
+    });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
     logger.error('Failed to stop discovery service:', error);
-    res.status(500).json({ error: errorMessage });
+    res.status(500).json({ 
+      error: errorMessage,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Analyze specific token
+discoveryRouter.post('/analyze/:address', async (req, res) => {
+  try {
+    const { address } = req.params;
+    
+    logger.info(`Manual analysis requested for token: ${address}`);
+    
+    const analysis = await discoveryService.analyzeSpecificToken(address);
+    
+    res.json({
+      message: 'Token analysis completed',
+      token_address: address,
+      analysis: {
+        investment_tier: analysis.investmentTier,
+        composite_score: analysis.compositeScore,
+        market_health_score: analysis.marketHealthScore,
+        security_score: analysis.securityScore,
+        risk_score: analysis.overallRiskScore,
+        confidence_score: analysis.confidenceScore,
+        alert_flags: analysis.alertFlags,
+        reasoning_points: analysis.reasoningPoints,
+        strategies: analysis.strategy,
+        processing_time_ms: analysis.processingTimeMs,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    logger.error(`Failed to analyze token ${req.params.address}:`, error);
+    res.status(500).json({ 
+      error: errorMessage,
+      token_address: req.params.address,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Get token analysis results
+discoveryRouter.get('/analysis/:address', async (req, res) => {
+  try {
+    const { address } = req.params;
+    
+    const analysis = await discoveryService.getTokenAnalysis(address);
+    
+    if (!analysis) {
+      return res.status(404).json({ 
+        error: 'Token analysis not found',
+        token_address: address,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    
+    res.json({
+      token_address: address,
+      analysis,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    logger.error(`Failed to get analysis for ${req.params.address}:`, error);
+    res.status(500).json({ 
+      error: errorMessage,
+      token_address: req.params.address,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Get recent alerts
+discoveryRouter.get('/alerts', async (req, res) => {
+  try {
+    const { limit = 20 } = req.query;
+    
+    const alerts = await discoveryService.getRecentAlerts(Number(limit));
+    
+    res.json({
+      total: alerts.length,
+      limit: Number(limit),
+      alerts,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    logger.error('Failed to get recent alerts:', error);
+    res.status(500).json({ 
+      error: errorMessage,
+      timestamp: new Date().toISOString(),
+    });
   }
 });
 
 // Add discovery routes to app
 app.use('/discovery', discoveryRouter);
 
-// Analysis routes
-const analysisRouter = Router();
+// Add market metrics routes
+app.use('/api/market', marketMetricsRouter);
 
-analysisRouter.get('/tokens', async (req, res) => {
+// Add enhanced token routes
+const tokensRouter = Router();
+
+// Get tokens with enhanced filtering
+tokensRouter.get('/', async (req, res) => {
   try {
-    const { status, limit = 50, classification } = req.query;
-    
-    let query = db('tokens')
-      .select('*')
-      .orderBy('composite_score', 'desc')
-      .limit(Number(limit));
+    const {
+      limit = 50,
+      offset = 0,
+      tier = 'all',
+      platform = 'all',
+      min_score = 0,
+      max_risk = 1,
+      sort = 'composite_score',
+      order = 'desc',
+      timeframe = '24h'
+    } = req.query;
 
-    if (status) {
-      query = query.where('analysis_status', status);
+    // Build query
+    let query = require('./database/postgres').db('tokens')
+      .select(
+        'address',
+        'symbol', 
+        'name',
+        'platform',
+        'composite_score',
+        'safety_score',
+        'potential_score',
+        'investment_classification',
+        'market_cap',
+        'liquidity',
+        'volume_24h',
+        'price',
+        'discovered_at',
+        'updated_at'
+      )
+      .where('analysis_status', 'COMPLETED')
+      .where('composite_score', '>=', Number(min_score))
+      .limit(Number(limit))
+      .offset(Number(offset));
+
+    // Time filtering
+    if (timeframe !== 'all') {
+      const intervals: Record<string, string> = {
+        '1h': '1 HOUR',
+        '6h': '6 HOURS', 
+        '24h': '24 HOURS',
+        '7d': '7 DAYS',
+      };
+      const interval = intervals[timeframe as string] || '24 HOURS';
+      query = query.where('discovered_at', '>', require('./database/postgres').db.raw(`NOW() - INTERVAL '${interval}'`));
     }
 
-    if (classification) {
-      query = query.where('investment_classification', classification);
+    // Tier filtering
+    if (tier !== 'all') {
+      const tierMap: Record<string, string> = {
+        'gems': 'HIDDEN_GEM',
+        'burst': 'NEW_BURST', 
+        'standard': 'STANDARD',
+        'risk': 'HIGH_RISK',
+        'avoid': 'AVOID',
+      };
+      if (tierMap[tier as string]) {
+        query = query.where('investment_classification', tierMap[tier as string]);
+      }
     }
+
+    // Platform filtering
+    if (platform !== 'all') {
+      query = query.where('platform', platform);
+    }
+
+    // Risk filtering  
+    if (Number(max_risk) < 1) {
+      query = query.where('safety_score', '>=', 1 - Number(max_risk));
+    }
+
+    // Sorting
+    const validSortFields = ['composite_score', 'safety_score', 'potential_score', 'market_cap', 'volume_24h', 'discovered_at'];
+    const sortField = validSortFields.includes(sort as string) ? sort as string : 'composite_score';
+    const sortOrder = order === 'asc' ? 'asc' : 'desc';
+    query = query.orderBy(sortField, sortOrder);
 
     const tokens = await query;
-    
+
+    // Get total count for pagination
+    const totalQuery = require('./database/postgres').db('tokens')
+      .count('* as count')
+      .where('analysis_status', 'COMPLETED')
+      .where('composite_score', '>=', Number(min_score));
+
+    if (timeframe !== 'all') {
+      const intervals: Record<string, string> = {
+        '1h': '1 HOUR',
+        '6h': '6 HOURS',
+        '24h': '24 HOURS', 
+        '7d': '7 DAYS',
+      };
+      const interval = intervals[timeframe as string] || '24 HOURS';
+      totalQuery.where('discovered_at', '>', require('./database/postgres').db.raw(`NOW() - INTERVAL '${interval}'`));
+    }
+
+    if (tier !== 'all') {
+      const tierMap: Record<string, string> = {
+        'gems': 'HIDDEN_GEM',
+        'burst': 'NEW_BURST',
+        'standard': 'STANDARD', 
+        'risk': 'HIGH_RISK',
+        'avoid': 'AVOID',
+      };
+      if (tierMap[tier as string]) {
+        totalQuery.where('investment_classification', tierMap[tier as string]);
+      }
+    }
+
+    if (platform !== 'all') {
+      totalQuery.where('platform', platform);
+    }
+
+    if (Number(max_risk) < 1) {
+      totalQuery.where('safety_score', '>=', 1 - Number(max_risk));
+    }
+
+    const totalResult = await totalQuery.first();
+    const total = parseInt(totalResult?.count || '0');
+
     res.json({
-      count: tokens.length,
-      tokens: tokens.map(token => ({
-        address: token.address,
-        symbol: token.symbol,
-        name: token.name,
-        platform: token.platform,
-        scores: {
-          safety: token.safety_score,
-          potential: token.potential_score,
-          composite: token.composite_score,
-        },
-        classification: token.investment_classification,
-        marketCap: token.market_cap,
-        liquidity: token.liquidity,
-        status: token.analysis_status,
-        discoveredAt: token.discovered_at,
-        analyzedAt: token.updated_at,
+      total,
+      limit: Number(limit),
+      offset: Number(offset),
+      filters: {
+        tier,
+        platform, 
+        min_score: Number(min_score),
+        max_risk: Number(max_risk),
+        timeframe,
+        sort: sortField,
+        order: sortOrder,
+      },
+      tokens: tokens.map((token: any) => ({
+        ...token,
+        composite_score: parseFloat(token.composite_score || '0'),
+        safety_score: parseFloat(token.safety_score || '0'),
+        potential_score: parseFloat(token.potential_score || '0'),
+        market_cap: parseFloat(token.market_cap || '0'),
+        liquidity: parseFloat(token.liquidity || '0'),
+        volume_24h: parseFloat(token.volume_24h || '0'),
+        price: parseFloat(token.price || '0'),
       })),
+      timestamp: new Date().toISOString(),
     });
+
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
     logger.error('Failed to get tokens:', error);
-    res.status(500).json({ error: 'Failed to get tokens' });
+    res.status(500).json({ 
+      error: errorMessage,
+      timestamp: new Date().toISOString(),
+    });
   }
 });
 
-analysisRouter.get('/tokens/:address', async (req, res) => {
+// Get single token details
+tokensRouter.get('/:address', async (req, res) => {
   try {
     const { address } = req.params;
     
-    // Validate address
-    if (!AddressValidator.isValidAddress(address)) {
-      return res.status(400).json({ error: 'Invalid token address' });
-    }
-
-    const token = await db('tokens')
+    const token = await require('./database/postgres').db('tokens')
+      .select('*')
       .where('address', address)
       .first();
 
     if (!token) {
-      return res.status(404).json({ error: 'Token not found' });
+      return res.status(404).json({ 
+        error: 'Token not found',
+        token_address: address,
+        timestamp: new Date().toISOString(),
+      });
     }
 
-    // Get analysis history
-    const history = await db('token_analysis_history')
-      .where('token_address', address)
-      .orderBy('analyzed_at', 'desc')
-      .limit(10);
-
+    // Get enhanced analysis if available
+    const analysis = await discoveryService.getTokenAnalysis(address);
+    
     res.json({
       token: {
-        address: token.address,
-        symbol: token.symbol,
-        name: token.name,
-        platform: token.platform,
-        scores: {
-          safety: token.safety_score,
-          potential: token.potential_score,
-          composite: token.composite_score,
-        },
-        classification: token.investment_classification,
-        marketCap: token.market_cap,
-        price: token.price,
-        volume24h: token.volume_24h,
-        liquidity: token.liquidity,
-        status: token.analysis_status,
-        metadata: token.raw_data ? JSON.parse(token.raw_data) : {},
-        discoveredAt: token.discovered_at,
-        analyzedAt: token.updated_at,
+        ...token,
+        composite_score: parseFloat(token.composite_score || '0'),
+        safety_score: parseFloat(token.safety_score || '0'),
+        potential_score: parseFloat(token.potential_score || '0'),
+        market_cap: parseFloat(token.market_cap || '0'),
+        liquidity: parseFloat(token.liquidity || '0'),
+        volume_24h: parseFloat(token.volume_24h || '0'),
+        price: parseFloat(token.price || '0'),
+        raw_data: token.raw_data || {},
       },
-      history: history.map(h => ({
-        analyzedAt: h.analyzed_at,
-        scores: {
-          safety: h.safety_score,
-          potential: h.potential_score,
-          composite: h.composite_score,
-        },
-      })),
+      enhanced_analysis: analysis,
+      timestamp: new Date().toISOString(),
     });
+
   } catch (error) {
-    logger.error('Failed to get token details:', error);
-    res.status(500).json({ error: 'Failed to get token details' });
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    logger.error(`Failed to get token ${req.params.address}:`, error);
+    res.status(500).json({ 
+      error: errorMessage,
+      token_address: req.params.address,
+      timestamp: new Date().toISOString(),
+    });
   }
 });
 
-analysisRouter.get('/top-opportunities', async (req, res) => {
-  try {
-    const opportunities = await db('tokens')
-      .where('analysis_status', 'COMPLETED')
-      .where('composite_score', '>=', 0.65)
-      .whereIn('investment_classification', ['STRONG_BUY', 'BUY'])
-      .orderBy('composite_score', 'desc')
-      .limit(20);
+app.use('/api/tokens', tokensRouter);
 
-    res.json({
-      count: opportunities.length,
-      opportunities: opportunities.map(token => ({
-        address: token.address,
-        symbol: token.symbol,
-        name: token.name,
-        platform: token.platform,
-        score: token.composite_score,
-        classification: token.investment_classification,
-        marketCap: token.market_cap,
-        liquidity: token.liquidity,
-        discoveredAt: token.discovered_at,
-      })),
-    });
-  } catch (error) {
-    logger.error('Failed to get opportunities:', error);
-    res.status(500).json({ error: 'Failed to get opportunities' });
+// Initialize analyzers with the discovery service
+app.use((req, res, next) => {
+  // This middleware runs after the service is initialized
+  if (discoveryService.getStats().isRunning) {
+    initializeAnalyzers(
+      discoveryService.getEnhancedAnalyzer(),
+      discoveryService.getMarketAnalyzer()
+    );
   }
+  next();
 });
 
-// Add analysis routes to app
-app.use('/api/analysis', analysisRouter);
+// API documentation endpoint
+app.get('/api', (req, res) => {
+  res.json({
+    message: 'Solana Token Discovery & Analysis API',
+    version: '2.1.0',
+    module: 'Module 2B1: Core Market Metrics & Real-time Monitoring',
+    endpoints: {
+      health: {
+        'GET /health': 'Basic health check',
+        'GET /health/detailed': 'Detailed system health',
+      },
+      discovery: {
+        'GET /discovery/stats': 'Discovery service statistics',
+        'POST /discovery/start': 'Start discovery service',
+        'POST /discovery/stop': 'Stop discovery service',
+        'POST /discovery/analyze/:address': 'Analyze specific token',
+        'GET /discovery/analysis/:address': 'Get token analysis',
+        'GET /discovery/alerts': 'Get recent alerts',
+      },
+      tokens: {
+        'GET /api/tokens': 'List tokens with filtering',
+        'GET /api/tokens/:address': 'Get token details',
+      },
+      market: {
+        'GET /api/market/overview': 'Market overview and stats',
+        'GET /api/market/top-tokens': 'Top performing tokens',
+        'GET /api/market/token/:address': 'Detailed token analysis',
+        'GET /api/market/token/:address/metrics': 'Real-time token metrics',
+        'GET /api/market/token/:address/history': 'Historical price data',
+        'GET /api/market/alerts': 'Market alerts',
+        'GET /api/market/patterns': 'Trading patterns',
+        'GET /api/market/stats': 'Market analyzer statistics',
+        'POST /api/market/token/:address/analyze': 'Force token analysis',
+      },
+    },
+    features: [
+      'Real-time token discovery from PumpFun and Raydium',
+      'Enhanced market metrics analysis',
+      'Multi-tiered investment classification',
+      'Risk assessment and manipulation detection',
+      'Trading pattern recognition',
+      'Price and volume alert system',
+      'Historical data tracking',
+      'Comprehensive API endpoints',
+    ],
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Error handling
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
   logger.error('Unhandled error', err);
   res.status(500).json({
     error: 'Internal server error',
-    message: config.env === 'development' ? err.message : undefined,
+    message: config.env === 'development' ? err.message : 'An unexpected error occurred',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `The requested endpoint ${req.method} ${req.originalUrl} was not found`,
+    available_endpoints: '/api',
+    timestamp: new Date().toISOString(),
   });
 });
 
