@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memecoin Discovery - Live Token Feed</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0b0d;
+            color: #e4e8eb;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .header {
+            background: #151619;
+            border-bottom: 1px solid #2a2d31;
+            padding: 16px 24px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header-stats {
+            display: flex;
+            gap: 32px;
+        }
+
+        .header-stat {
+            text-align: right;
+        }
+
+        .header-stat-label {
+            font-size: 12px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .header-stat-value {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        /* Time Filter Tabs */
+        .time-filters {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .time-filter {
+            padding: 8px 16px;
+            background: #1a1c1f;
+            border: 1px solid #2a2d31;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .time-filter:hover {
+            background: #202225;
+            border-color: #3a3d41;
+        }
+
+        .time-filter.active {
+            background: #667eea;
+            border-color: #667eea;
+            color: white;
+        }
+
+        .filter-separator {
+            width: 1px;
+            height: 20px;
+            background: #2a2d31;
+            margin: 0 8px;
+        }
+
+        /* Token Table */
+        .token-table-container {
+            padding: 0;
+        }
+
+        .token-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .token-table th {
+            background: #151619;
+            position: sticky;
+            top: 109px;
+            z-index: 10;
+            padding: 12px 16px;
+            text-align: left;
+            font-size: 12px;
+            color: #6b7280;
+            font-weight: 500;
+            text-transform: uppercase;
+            border-bottom: 1px solid #2a2d31;
+        }
+
+        .token-table th.number {
+            text-align: right;
+        }
+
+        .token-table td {
+            padding: 16px;
+            border-bottom: 1px solid #1a1c1f;
+            font-size: 14px;
+        }
+
+        .token-table tr {
+            transition: background 0.2s;
+        }
+
+        .token-table tr:hover {
+            background: #151619;
+        }
+
+        /* Token Info Cell */
+        .token-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .token-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #2a2d31;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 16px;
+            position: relative;
+        }
+
+        .token-verified {
+            position: absolute;
+            bottom: -2px;
+            right: -2px;
+            width: 16px;
+            height: 16px;
+            background: #10b981;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 2px solid #0a0b0d;
+        }
+
+        .token-details {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .token-symbol {
+            font-weight: 600;
+            color: #e4e8eb;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .token-name {
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        .token-badges {
+            display: flex;
+            gap: 4px;
+            margin-left: 8px;
+        }
+
+        .badge {
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        .badge-fire {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .badge-gem {
+            background: rgba(102, 126, 234, 0.2);
+            color: #667eea;
+        }
+
+        .badge-new {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+
+        /* Age */
+        .token-age {
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        /* Numbers */
+        .number {
+            text-align: right;
+            font-weight: 500;
+        }
+
+        .price-up {
+            color: #10b981;
+        }
+
+        .price-down {
+            color: #ef4444;
+        }
+
+        .price-neutral {
+            color: #6b7280;
+        }
+
+        /* Market Cap with Fire */
+        .market-cap {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 6px;
+        }
+
+        .fire-icon {
+            color: #f59e0b;
+        }
+
+        /* Smart Money / Holders */
+        .holders-info {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 2px;
+        }
+
+        .holder-count {
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .holder-label {
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        /* Buy Button */
+        .buy-button {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .buy-button:hover {
+            background: #059669;
+            transform: translateY(-1px);
+        }
+
+        /* Risk Indicators */
+        .risk-high {
+            background: rgba(239, 68, 68, 0.1);
+        }
+
+        .risk-medium {
+            background: rgba(245, 158, 11, 0.1);
+        }
+
+        /* Graduation Progress */
+        .graduation-cell {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .graduation-bar {
+            flex: 1;
+            height: 4px;
+            background: #1a1c1f;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .graduation-progress {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s ease;
+        }
+
+        .graduation-text {
+            font-size: 12px;
+            color: #6b7280;
+            min-width: 40px;
+            text-align: right;
+        }
+
+        /* Loading State */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6b7280;
+        }
+
+        /* Quick Stats Bar */
+        .quick-stats {
+            background: #151619;
+            padding: 16px 24px;
+            display: flex;
+            gap: 32px;
+            border-bottom: 1px solid #2a2d31;
+        }
+
+        .quick-stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .quick-stat-label {
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .quick-stat-value {
+            font-weight: 600;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <div class="header-top">
+            <h1>Live Token Discovery Feed</h1>
+            <div class="header-stats">
+                <div class="header-stat">
+                    <div class="header-stat-label">Tokens/Hour</div>
+                    <div class="header-stat-value">960</div>
+                </div>
+                <div class="header-stat">
+                    <div class="header-stat-label">Active Filters</div>
+                    <div class="header-stat-value">Hidden Gems</div>
+                </div>
+                <div class="header-stat">
+                    <div class="header-stat-label">API Cost Today</div>
+                    <div class="header-stat-value">$15.42</div>
+                </div>
+            </div>
+        </div>
+        <div class="time-filters">
+            <button class="time-filter active">Trending</button>
+            <button class="time-filter">New Pairs</button>
+            <button class="time-filter">Graduation Ready</button>
+            <div class="filter-separator"></div>
+            <button class="time-filter">1m</button>
+            <button class="time-filter">5m</button>
+            <button class="time-filter">1h</button>
+            <button class="time-filter">6h</button>
+            <button class="time-filter">24h</button>
+        </div>
+    </div>
+
+    <!-- Quick Stats Bar -->
+    <div class="quick-stats">
+        <div class="quick-stat">
+            <span class="quick-stat-label">Total Discovered:</span>
+            <span class="quick-stat-value">1,761</span>
+        </div>
+        <div class="quick-stat">
+            <span class="quick-stat-label">High Potential:</span>
+            <span class="quick-stat-value price-up">47</span>
+        </div>
+        <div class="quick-stat">
+            <span class="quick-stat-label">Signals Today:</span>
+            <span class="quick-stat-value">18</span>
+        </div>
+        <div class="quick-stat">
+            <span class="quick-stat-label">Success Rate:</span>
+            <span class="quick-stat-value price-up">72.4%</span>
+        </div>
+    </div>
+
+    <!-- Token Table -->
+    <div class="token-table-container">
+        <table class="token-table">
+            <thead>
+                <tr>
+                    <th>Token</th>
+                    <th>Age</th>
+                    <th class="number">Liq</th>
+                    <th class="number">MC</th>
+                    <th class="number">Graduation</th>
+                    <th class="number">Holders</th>
+                    <th class="number">Smart $</th>
+                    <th class="number">1m TXs</th>
+                    <th class="number">1m Vol</th>
+                    <th class="number">Price</th>
+                    <th class="number">1m%</th>
+                    <th class="number">5m%</th>
+                    <th class="number">1h%</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>
+                        <div class="token-info">
+                            <div class="token-avatar">
+                                P
+                                <div class="token-verified">✓</div>
+                            </div>
+                            <div class="token-details">
+                                <div class="token-symbol">
+                                    PESHI
+                                    <div class="token-badges">
+                                        <span class="badge badge-fire">🔥</span>
+                                        <span class="badge badge-gem">💎</span>
+                                    </div>
+                                </div>
+                                <div class="token-name">Peshi Solana</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="token-age">40m</td>
+                    <td class="number">$85.3K</td>
+                    <td class="number market-cap">
+                        $303.8K
+                        <span class="fire-icon">🔥</span>
+                    </td>
+                    <td>
+                        <div class="graduation-cell">
+                            <div class="graduation-bar">
+                                <div class="graduation-progress" style="width: 78%"></div>
+                            </div>
+                            <span class="graduation-text">78%</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">838</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">12</span>
+                            <span class="holder-label">wallets</span>
+                        </div>
+                    </td>
+                    <td class="number">245</td>
+                    <td class="number">$42.8K</td>
+                    <td class="number">$0.0003</td>
+                    <td class="number price-up">+12%</td>
+                    <td class="number price-up">+8%</td>
+                    <td class="number price-up">+32%</td>
+                    <td>
+                        <button class="buy-button">
+                            <span>Buy</span>
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path>
+                            </svg>
+                        </button>
+                    </td>
+                </tr>
+                <tr>
+                    <td>
+                        <div class="token-info">
+                            <div class="token-avatar">M</div>
+                            <div class="token-details">
+                                <div class="token-symbol">
+                                    MAP
+                                    <div class="token-badges">
+                                        <span class="badge badge-new">NEW</span>
+                                    </div>
+                                </div>
+                                <div class="token-name">Maps Protocol</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="token-age">18m</td>
+                    <td class="number">$130.8K</td>
+                    <td class="number">$115.8K</td>
+                    <td>
+                        <div class="graduation-cell">
+                            <div class="graduation-bar">
+                                <div class="graduation-progress" style="width: 45%"></div>
+                            </div>
+                            <span class="graduation-text">45%</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">210</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">3</span>
+                            <span class="holder-label">wallets</span>
+                        </div>
+                    </td>
+                    <td class="number">76</td>
+                    <td class="number">$12.4K</td>
+                    <td class="number">$0.0001</td>
+                    <td class="number price-up">+21.5%</td>
+                    <td class="number price-up">+72.4%</td>
+                    <td class="number price-up">+145%</td>
+                    <td>
+                        <button class="buy-button">
+                            <span>Buy</span>
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path>
+                            </svg>
+                        </button>
+                    </td>
+                </tr>
+                <tr class="risk-medium">
+                    <td>
+                        <div class="token-info">
+                            <div class="token-avatar">M</div>
+                            <div class="token-details">
+                                <div class="token-symbol">
+                                    MOONSHI
+                                    <div class="token-badges">
+                                        <span class="badge badge-fire">⚠️</span>
+                                    </div>
+                                </div>
+                                <div class="token-name">Moonshot Shiba</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="token-age">47m</td>
+                    <td class="number">$118.2K</td>
+                    <td class="number">$102.8K</td>
+                    <td>
+                        <div class="graduation-cell">
+                            <div class="graduation-bar">
+                                <div class="graduation-progress" style="width: 35%"></div>
+                            </div>
+                            <span class="graduation-text">35%</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">218</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">1</span>
+                            <span class="holder-label">wallet</span>
+                        </div>
+                    </td>
+                    <td class="number">156</td>
+                    <td class="number">$28.9K</td>
+                    <td class="number">$0.0001</td>
+                    <td class="number price-up">+14.4%</td>
+                    <td class="number price-up">+42.2%</td>
+                    <td class="number price-down">-8.1%</td>
+                    <td>
+                        <button class="buy-button">
+                            <span>Buy</span>
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path>
+                            </svg>
+                        </button>
+                    </td>
+                </tr>
+                <tr>
+                    <td>
+                        <div class="token-info">
+                            <div class="token-avatar">F</div>
+                            <div class="token-details">
+                                <div class="token-symbol">
+                                    FSM
+                                    <div class="token-badges">
+                                        <span class="badge badge-gem">💎</span>
+                                    </div>
+                                </div>
+                                <div class="token-name">Flying Spaghetti Monster</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="token-age">10m</td>
+                    <td class="number">$198.5K</td>
+                    <td class="number">$341.7K</td>
+                    <td>
+                        <div class="graduation-cell">
+                            <div class="graduation-bar">
+                                <div class="graduation-progress" style="width: 89%"></div>
+                            </div>
+                            <span class="graduation-text">89%</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">687</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">18</span>
+                            <span class="holder-label">wallets</span>
+                        </div>
+                    </td>
+                    <td class="number">342</td>
+                    <td class="number">$89.2K</td>
+                    <td class="number">$0.0004</td>
+                    <td class="number price-up">+4.4%</td>
+                    <td class="number price-down">-8.1%</td>
+                    <td class="number price-up">+67.2%</td>
+                    <td>
+                        <button class="buy-button">
+                            <span>Buy</span>
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path>
+                            </svg>
+                        </button>
+                    </td>
+                </tr>
+                <tr>
+                    <td>
+                        <div class="token-info">
+                            <div class="token-avatar">S</div>
+                            <div class="token-details">
+                                <div class="token-symbol">
+                                    SOPH
+                                    <div class="token-badges">
+                                        <span class="badge badge-new">NEW</span>
+                                    </div>
+                                </div>
+                                <div class="token-name">Sophisticated Protocol</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="token-age">2m</td>
+                    <td class="number">$125.8K</td>
+                    <td class="number">$232.7K</td>
+                    <td>
+                        <div class="graduation-cell">
+                            <div class="graduation-bar">
+                                <div class="graduation-progress" style="width: 65%"></div>
+                            </div>
+                            <span class="graduation-text">65%</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">156</span>
+                        </div>
+                    </td>
+                    <td class="number">
+                        <div class="holders-info">
+                            <span class="holder-count">7</span>
+                            <span class="holder-label">wallets</span>
+                        </div>
+                    </td>
+                    <td class="number">98</td>
+                    <td class="number">$18.7K</td>
+                    <td class="number">$0.0002</td>
+                    <td class="number price-up">+43.2%</td>
+                    <td class="number price-up">+1.2K%</td>
+                    <td class="number price-neutral">0%</td>
+                    <td>
+                        <button class="buy-button">
+                            <span>Buy</span>
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path>
+                            </svg>
+                        </button>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>

@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Monitoring - Memecoin Trading Bot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0b0d;
+            color: #e4e8eb;
+        }
+
+        /* Header */
+        .header {
+            background: #151619;
+            border-bottom: 1px solid #2a2d31;
+            padding: 20px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .system-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 16px;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            border-radius: 8px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.8; transform: scale(1.2); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
+        .status-text {
+            font-weight: 600;
+            color: #10b981;
+        }
+
+        /* Main Grid */
+        .monitoring-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            padding: 20px;
+            max-width: 1920px;
+            margin: 0 auto;
+        }
+
+        /* Cards */
+        .card {
+            background: #151619;
+            border: 1px solid #2a2d31;
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        /* System Health */
+        .system-health {
+            grid-column: span 2;
+        }
+
+        .health-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .health-item {
+            background: #0d0e10;
+            padding: 16px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .health-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .health-icon.good {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+
+        .health-icon.warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+        }
+
+        .health-icon.error {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .health-info {
+            flex: 1;
+        }
+
+        .health-label {
+            font-size: 13px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .health-value {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        /* Resource Usage */
+        .resource-usage {
+            grid-column: span 2;
+        }
+
+        .usage-item {
+            margin-bottom: 20px;
+        }
+
+        .usage-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .usage-label {
+            font-weight: 500;
+        }
+
+        .usage-value {
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .usage-bar {
+            width: 100%;
+            height: 12px;
+            background: #1a1c1f;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .usage-fill {
+            height: 100%;
+            background: #667eea;
+            transition: width 0.3s ease;
+        }
+
+        .usage-fill.warning {
+            background: #f59e0b;
+        }
+
+        .usage-fill.danger {
+            background: #ef4444;
+        }
+
+        .usage-details {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 4px;
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        /* Processing Stats */
+        .processing-stats {
+            grid-column: span 4;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 16px;
+        }
+
+        .stat-box {
+            background: #0d0e10;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-icon {
+            width: 32px;
+            height: 32px;
+            margin: 0 auto 12px;
+            color: #667eea;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: #6b7280;
+        }
+
+        /* Queue Status */
+        .queue-status {
+            grid-column: span 2;
+        }
+
+        .queue-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .queue-item {
+            padding: 16px;
+            background: #0d0e10;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .queue-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .queue-name {
+            font-weight: 600;
+        }
+
+        .queue-stats {
+            display: flex;
+            gap: 16px;
+            font-size: 13px;
+            color: #6b7280;
+        }
+
+        .queue-size {
+            font-size: 24px;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        /* Module Status */
+        .module-status {
+            grid-column: span 2;
+        }
+
+        .module-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .module-item {
+            padding: 12px 16px;
+            background: #0d0e10;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .module-name {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 500;
+        }
+
+        .module-indicator {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+
+        .module-indicator.active {
+            background: #10b981;
+        }
+
+        .module-indicator.inactive {
+            background: #6b7280;
+        }
+
+        .module-indicator.error {
+            background: #ef4444;
+        }
+
+        .module-uptime {
+            font-size: 13px;
+            color: #6b7280;
+        }
+
+        /* Performance Chart */
+        .performance-chart {
+            grid-column: span 4;
+        }
+
+        .chart-container {
+            height: 300px;
+            background: #0d0e10;
+            border-radius: 8px;
+            padding: 16px;
+            position: relative;
+        }
+
+        .chart-legend {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            display: flex;
+            gap: 20px;
+            font-size: 12px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        /* Error Log */
+        .error-log {
+            grid-column: span 2;
+        }
+
+        .log-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .log-item {
+            padding: 12px;
+            background: #0d0e10;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .log-type {
+            font-weight: 600;
+        }
+
+        .log-error {
+            color: #ef4444;
+        }
+
+        .log-warning {
+            color: #f59e0b;
+        }
+
+        .log-time {
+            color: #6b7280;
+            font-size: 12px;
+        }
+
+        .log-message {
+            color: #9ca3af;
+        }
+
+        /* Database Stats */
+        .database-stats {
+            grid-column: span 2;
+        }
+
+        .db-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .db-item {
+            background: #0d0e10;
+            padding: 16px;
+            border-radius: 8px;
+        }
+
+        .db-name {
+            font-size: 13px;
+            color: #6b7280;
+            margin-bottom: 8px;
+        }
+
+        .db-size {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .db-growth {
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        /* Action Buttons */
+        .actions-section {
+            grid-column: span 4;
+            display: flex;
+            gap: 12px;
+            padding: 16px;
+            background: #0d0e10;
+            border-radius: 12px;
+        }
+
+        .action-button {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+        }
+
+        .action-restart {
+            background: #667eea;
+            color: white;
+        }
+
+        .action-restart:hover {
+            background: #5a67d8;
+        }
+
+        .action-clear {
+            background: #1a1c1f;
+            color: #e4e8eb;
+            border: 1px solid #2a2d31;
+        }
+
+        .action-clear:hover {
+            background: #202225;
+        }
+
+        .action-emergency {
+            background: #ef4444;
+            color: white;
+        }
+
+        .action-emergency:hover {
+            background: #dc2626;
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <h1>System Performance Monitoring</h1>
+        <div class="system-status">
+            <div class="status-dot"></div>
+            <span class="status-text">All Systems Operational</span>
+        </div>
+    </div>
+
+    <!-- Monitoring Grid -->
+    <div class="monitoring-grid">
+        <!-- System Health -->
+        <div class="card system-health">
+            <div class="card-header">
+                <h3 class="card-title">System Health</h3>
+            </div>
+            <div class="health-grid">
+                <div class="health-item">
+                    <div class="health-icon good">
+                        <svg width="24" height="24" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"></path>
+                        </svg>
+                    </div>
+                    <div class="health-info">
+                        <div class="health-label">Uptime</div>
+                        <div class="health-value">99.98%</div>
+                    </div>
+                </div>
+                <div class="health-item">
+                    <div class="health-icon good">
+                        <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                        </svg>
+                    </div>
+                    <div class="health-info">
+                        <div class="health-label">Response Time</div>
+                        <div class="health-value">452ms</div>
+                    </div>
+                </div>
+                <div class="health-item">
+                    <div class="health-icon warning">
+                        <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                    </div>
+                    <div class="health-info">
+                        <div class="health-label">Queue Latency</div>
+                        <div class="health-value">1.8s</div>
+                    </div>
+                </div>
+                <div class="health-item">
+                    <div class="health-icon good">
+                        <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                        </svg>
+                    </div>
+                    <div class="health-info">
+                        <div class="health-label">Error Rate</div>
+                        <div class="health-value">0.12%</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Resource Usage -->
+        <div class="card resource-usage">
+            <div class="card-header">
+                <h3 class="card-title">Resource Usage</h3>
+            </div>
+            <div class="usage-item">
+                <div class="usage-header">
+                    <span class="usage-label">CPU Usage</span>
+                    <span class="usage-value">42%</span>
+                </div>
+                <div class="usage-bar">
+                    <div class="usage-fill" style="width: 42%;"></div>
+                </div>
+                <div class="usage-details">
+                    <span>4 cores @ 2.8GHz</span>
+                    <span>Normal load</span>
+                </div>
+            </div>
+            <div class="usage-item">
+                <div class="usage-header">
+                    <span class="usage-label">Memory Usage</span>
+                    <span class="usage-value">6.8 GB / 16 GB</span>
+                </div>
+                <div class="usage-bar">
+                    <div class="usage-fill warning" style="width: 42.5%;"></div>
+                </div>
+                <div class="usage-details">
+                    <span>Node.js: 4.2GB</span>
+                    <span>Available: 9.2GB</span>
+                </div>
+            </div>
+            <div class="usage-item">
+                <div class="usage-header">
+                    <span class="usage-label">Disk Usage</span>
+                    <span class="usage-value">84 GB / 500 GB</span>
+                </div>
+                <div class="usage-bar">
+                    <div class="usage-fill" style="width: 16.8%;"></div>
+                </div>
+                <div class="usage-details">
+                    <span>Database: 78GB</span>
+                    <span>Logs: 6GB</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Processing Stats -->
+        <div class="card processing-stats">
+            <div class="card-header">
+                <h3 class="card-title">Processing Statistics (24h)</h3>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <svg class="stat-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14"></path>
+                    </svg>
+                    <div class="stat-value">23,041</div>
+                    <div class="stat-label">Tokens Discovered</div>
+                </div>
+                <div class="stat-box">
+                    <svg class="stat-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+                    </svg>
+                    <div class="stat-value">19,847</div>
+                    <div class="stat-label">Analyzed</div>
+                </div>
+                <div class="stat-box">
+                    <svg class="stat-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"></path>
+                    </svg>
+                    <div class="stat-value">247</div>
+                    <div class="stat-label">Signals Generated</div>
+                </div>
+                <div class="stat-box">
+                    <svg class="stat-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <div class="stat-value">95.8%</div>
+                    <div class="stat-label">Success Rate</div>
+                </div>
+                <div class="stat-box">
+                    <svg class="stat-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <div class="stat-value">$18.76</div>
+                    <div class="stat-label">API Cost</div>
+                </div>
+                <div class="stat-box">
+                    <svg class="stat-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <div class="stat-value">960/h</div>
+                    <div class="stat-label">Discovery Rate</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Performance Chart -->
+        <div class="card performance-chart">
+            <div class="card-header">
+                <h3 class="card-title">System Performance (Last 24h)</h3>
+            </div>
+            <div class="chart-container">
+                <div class="chart-legend">
+                    <div class="legend-item">
+                        <div class="legend-dot" style="background: #667eea;"></div>
+                        <span>Tokens/Hour</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot" style="background: #10b981;"></div>
+                        <span>Success Rate</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot" style="background: #f59e0b;"></div>
+                        <span>Response Time</span>
+                    </div>
+                </div>
+                <svg width="100%" height="100%" viewBox="0 0 800 260">
+                    <!-- Grid lines -->
+                    <line x1="50" y1="220" x2="750" y2="220" stroke="#2a2d31" stroke-width="1" />
+                    <line x1="50" y1="165" x2="750" y2="165" stroke="#1a1c1f" stroke-width="1" stroke-dasharray="2,2" />
+                    <line x1="50" y1="110" x2="750" y2="110" stroke="#1a1c1f" stroke-width="1" stroke-dasharray="2,2" />
+                    <line x1="50" y1="55" x2="750" y2="55" stroke="#1a1c1f" stroke-width="1" stroke-dasharray="2,2" />
+                    
+                    <!-- Performance lines -->
+                    <path d="M50,120 L100,115 L150,110 L200,105 L250,100 L300,95 L350,90 L400,85 L450,80 L500,75 L550,70 L600,65 L650,60 L700,55 L750,50" 
+                          stroke="#667eea" stroke-width="2" fill="none" />
+                    <path d="M50,80 L100,78 L150,76 L200,74 L250,72 L300,70 L350,68 L400,66 L450,64 L500,62 L550,60 L600,58 L650,56 L700,54 L750,52" 
+                          stroke="#10b981" stroke-width="2" fill="none" />
+                    <path d="M50,180 L100,175 L150,170 L200,165 L250,160 L300,155 L350,150 L400,145 L450,140 L500,135 L550,130 L600,125 L650,120 L700,115 L750,110" 
+                          stroke="#f59e0b" stroke-width="2" fill="none" />
+                </svg>
+            </div>
+        </div>
+
+        <!-- Queue Status -->
+        <div class="card queue-status">
+            <div class="card-header">
+                <h3 class="card-title">Processing Queues</h3>
+            </div>
+            <div class="queue-list">
+                <div class="queue-item">
+                    <div class="queue-info">
+                        <div class="queue-name">Discovery Queue</div>
+                        <div class="queue-stats">
+                            <span>Processing: 42/min</span>
+                            <span>Avg wait: 1.2s</span>
+                        </div>
+                    </div>
+                    <div class="queue-size">156</div>
+                </div>
+                <div class="queue-item">
+                    <div class="queue-info">
+                        <div class="queue-name">Analysis Queue</div>
+                        <div class="queue-stats">
+                            <span>Processing: 38/min</span>
+                            <span>Avg wait: 2.8s</span>
+                        </div>
+                    </div>
+                    <div class="queue-size">248</div>
+                </div>
+                <div class="queue-item">
+                    <div class="queue-info">
+                        <div class="queue-name">Signal Queue</div>
+                        <div class="queue-stats">
+                            <span>Processing: 8/min</span>
+                            <span>Avg wait: 0.4s</span>
+                        </div>
+                    </div>
+                    <div class="queue-size">12</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Module Status -->
+        <div class="card module-status">
+            <div class="card-header">
+                <h3 class="card-title">Module Status</h3>
+            </div>
+            <div class="module-list">
+                <div class="module-item">
+                    <div class="module-name">
+                        <div class="module-indicator active"></div>
+                        Discovery Service
+                    </div>
+                    <div class="module-uptime">Uptime: 23h 45m</div>
+                </div>
+                <div class="module-item">
+                    <div class="module-name">
+                        <div class="module-indicator active"></div>
+                        API Integration
+                    </div>
+                    <div class="module-uptime">Uptime: 23h 45m</div>
+                </div>
+                <div class="module-item">
+                    <div class="module-name">
+                        <div class="module-indicator active"></div>
+                        Analysis Engine
+                    </div>
+                    <div class="module-uptime">Uptime: 23h 42m</div>
+                </div>
+                <div class="module-item">
+                    <div class="module-name">
+                        <div class="module-indicator active"></div>
+                        Signal Generator
+                    </div>
+                    <div class="module-uptime">Uptime: 23h 45m</div>
+                </div>
+                <div class="module-item">
+                    <div class="module-name">
+                        <div class="module-indicator active"></div>
+                        Smart Money Tracker
+                    </div>
+                    <div class="module-uptime">Uptime: 22h 18m</div>
+                </div>
+                <div class="module-item">
+                    <div class="module-name">
+                        <div class="module-indicator error"></div>
+                        ML Scoring (Training)
+                    </div>
+                    <div class="module-uptime">Last run: 2h ago</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Error Log -->
+        <div class="card error-log">
+            <div class="card-header">
+                <h3 class="card-title">Recent System Events</h3>
+            </div>
+            <div class="log-list">
+                <div class="log-item">
+                    <div class="log-header">
+                        <span class="log-type log-error">ERROR</span>
+                        <span class="log-time">12 min ago</span>
+                    </div>
+                    <div class="log-message">Moralis API rate limit exceeded - switching to fallback</div>
+                </div>
+                <div class="log-item">
+                    <div class="log-header">
+                        <span class="log-type log-warning">WARNING</span>
+                        <span class="log-time">28 min ago</span>
+                    </div>
+                    <div class="log-message">High memory usage detected (78%) - garbage collection triggered</div>
+                </div>
+                <div class="log-item">
+                    <div class="log-header">
+                        <span class="log-type log-warning">WARNING</span>
+                        <span class="log-time">1h 15m ago</span>
+                    </div>
+                    <div class="log-message">Analysis queue backlog growing - scaling up workers</div>
+                </div>
+                <div class="log-item">
+                    <div class="log-header">
+                        <span class="log-type log-error">ERROR</span>
+                        <span class="log-time">2h 8m ago</span>
+                    </div>
+                    <div class="log-message">ML model training failed - insufficient memory</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Database Stats -->
+        <div class="card database-stats">
+            <div class="card-header">
+                <h3 class="card-title">Database Statistics</h3>
+            </div>
+            <div class="db-grid">
+                <div class="db-item">
+                    <div class="db-name">PostgreSQL - Tokens</div>
+                    <div class="db-size">42.8 GB</div>
+                    <div class="db-growth">+2.1 GB today</div>
+                </div>
+                <div class="db-item">
+                    <div class="db-name">PostgreSQL - Analysis</div>
+                    <div class="db-size">28.4 GB</div>
+                    <div class="db-growth">+1.8 GB today</div>
+                </div>
+                <div class="db-item">
+                    <div class="db-name">QuestDB - Metrics</div>
+                    <div class="db-size">6.2 GB</div>
+                    <div class="db-growth">+420 MB today</div>
+                </div>
+                <div class="db-item">
+                    <div class="db-name">Cache (Redis)</div>
+                    <div class="db-size">842 MB</div>
+                    <div class="db-growth">82% hit rate</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="actions-section">
+            <button class="action-button action-restart">Restart Services</button>
+            <button class="action-button action-clear">Clear Cache</button>
+            <button class="action-button action-clear">Run Garbage Collection</button>
+            <button class="action-button action-clear">Export Logs</button>
+            <button class="action-button action-emergency">Emergency Stop</button>
+        </div>
+    </div>
+</body>
+</html>

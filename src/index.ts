@@ -3,8 +3,8 @@ import { config } from './config';
 import { logger } from './utils/logger';
 import { db } from './database/postgres';
 import { closeQuestDB } from './database/questdb';
-import { discoveryService } from './discovery/enhanced-discovery-service';
-//import { analysisService } from './analysis/analysis-service';
+import { discoveryService } from './discovery/discovery-service';
+import './api/server'; // Import API server
 
 async function bootstrap() {
   try {
@@ -15,6 +15,7 @@ async function bootstrap() {
     
     // Start server
     const server = app.listen(config.port, () => {
+      logger.info('API Server is running');
       logger.info(`Server running on port ${config.port}`);
       logger.info(`Environment: ${config.env}`);
     });
@@ -24,7 +25,6 @@ async function bootstrap() {
       setTimeout(async () => {
         logger.info('Auto-starting discovery service...');
         await discoveryService.start();
-        // await analysisService.start(); // Will be enabled in Module 2A
       }, 5000);
     }
     
