@@ -84,7 +84,7 @@ export class MarketController {
 
       res.json({
         timeframe,
-        trends: trends.map(trend => ({
+        trends: trends.map((trend: any) => ({
           time: trend.hour,
           activeTokens: Number(trend.active_tokens),
           avgPrice: Number(trend.avg_price),

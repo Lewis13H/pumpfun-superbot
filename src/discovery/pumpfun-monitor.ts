@@ -1,381 +1,657 @@
+// src/discovery/pumpfun-monitor.ts
 import WebSocket from 'ws';
-import axios from 'axios';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { BaseMonitor, TokenDiscovery } from './base-monitor';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { PumpFunToken } from './types';
+import { BondingCurveManager } from '../api/pumpfun/curve-manager';
+import { PumpEventProcessor } from '../api/pumpfun/event-processor';
+import { db } from '../database/postgres';
 
-export class PumpFunMonitor extends BaseMonitor {
+// Enhanced token discovery interface with pump.fun specific data
+export interface EnhancedTokenDiscovery extends TokenDiscovery {
+  bondingCurve: string;
+  associatedBondingCurve: string;
+  creator: string;
+  creatorVault: string;
+  initialPrice?: number;
+  initialLiquidity?: number;
+  curveProgress?: number;
+  virtualSolReserves?: number;
+  virtualTokenReserves?: number;
+}
+
+// Graduation tracking interface
+export interface GraduationCandidate {
+  tokenAddress: string;
+  symbol: string;
+  name: string;
+  bondingCurve?: string;
+  curveProgress: number;
+  currentSolReserves: number;
+  targetSolReserves: number;
+  distanceToGraduation: number;
+  estimatedTimeToGraduation?: number;
+  priceAtGraduation?: number;
+  currentPrice: number;
+  marketCapUSD: number;
+  targetMarketCapUSD: number;
+}
+
+export class EnhancedPumpFunMonitor extends BaseMonitor {
   private connection: Connection;
   private ws: WebSocket | null = null;
-  private httpPollInterval: NodeJS.Timeout | null = null;
+  private curveManager: BondingCurveManager;
+  private eventProcessor: PumpEventProcessor;
   private pingInterval: NodeJS.Timeout | null = null;
+  private subscriptionId: number | null = null;
   
-  // PumpFun Program IDs (from pumpfun-bot)
-  private PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
-  private PUMP_FUN_ACCOUNT = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+  // Graduation tracking
+  private graduationCheckInterval: NodeJS.Timeout | null = null;
+  private trackedTokens: Map<string, GraduationCandidate> = new Map();
+  private readonly GRADUATION_CHECK_INTERVAL = 30000; // 30 seconds
+  private readonly GRADUATION_MARKET_CAP_USD = 69420; // $69,420 USD market cap target
+  private readonly GRADUATION_SOL_THRESHOLD = 385; // Approximate SOL in bonding curve at graduation (at $180/SOL)
+  
+  // PumpFun constants
+  private readonly PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+  private readonly PUMP_FUN_FEE = new PublicKey('CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM');
+  private readonly PUMP_FUN_EVENT_AUTHORITY = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
 
   constructor() {
-    super('PumpFun');
+    super('EnhancedPumpFun');
     this.connection = new Connection(config.apis.heliusRpcUrl);
+    this.curveManager = new BondingCurveManager(this.connection);
+    this.eventProcessor = new PumpEventProcessor(this.PUMP_FUN_PROGRAM);
   }
 
   protected async startMonitoring(): Promise<void> {
-    // Try multiple approaches
-    await Promise.all([
-      this.monitorBlockchain(),      // Novel approach: Direct blockchain monitoring
-      this.tryAlternativeWebSocket(), // Try alternative WS endpoints
-      this.startHttpPolling()         // Keep HTTP as backup
-    ]);
+    logger.info('Starting enhanced PumpFun monitoring with graduation tracking');
+    
+    // Load existing tokens to track
+    await this.loadExistingTokensForTracking();
+    
+    // Start graduation tracking
+    this.startGraduationTracking();
+    
+    // Start WebSocket as primary method (more reliable than logs)
+    await this.connectWebSocket();
   }
 
-  // Novel Approach 1: Monitor blockchain directly for PumpFun transactions
-  private async monitorBlockchain(): Promise<void> {
+  /**
+   * Load existing pump.fun tokens for graduation tracking
+   */
+  private async loadExistingTokensForTracking(): Promise<void> {
     try {
-      // Subscribe to PumpFun program logs
-      const subscriptionId = this.connection.onLogs(
-        this.PUMP_FUN_PROGRAM,
-        async (logs) => {
-          if (logs.err) return;
-          
-          // Look for token creation events
-          const isTokenCreation = logs.logs.some(log => 
-            log.includes('InitializeMint') || 
-            log.includes('create') ||
-            log.includes('initialize')
-          );
+      const existingTokens = await db('tokens')
+        .where('platform', 'pumpfun')
+        .where('is_pump_fun', true)
+        .whereNotNull('bonding_curve')
+        .where('market_cap', '>', 5000) // Track tokens with >$5k market cap
+        .select('address', 'symbol', 'name', 'bonding_curve');
 
-          if (isTokenCreation) {
-            logger.info(`PumpFun token creation detected: ${logs.signature}`);
-            
-            // Try to process transaction
-            await this.processTransactionForToken(logs.signature);
-            
-            // Also emit a basic detection to ensure we capture it
-            this.emitDetectedToken(logs.signature);
-          }
-        },
-        'confirmed'
-      );
+      for (const token of existingTokens) {
+        await this.addTokenToGraduationTracking(token);
+      }
 
-      logger.info(`PumpFun blockchain monitor active with subscription: ${subscriptionId}`);
+      logger.info(`Loaded ${existingTokens.length} tokens for graduation tracking`);
     } catch (error) {
-      logger.error('Failed to start blockchain monitoring:', error);
+      logger.error('Error loading existing tokens:', error);
     }
   }
 
-  // Novel Approach 2: Try alternative WebSocket endpoints
-  private async tryAlternativeWebSocket(): Promise<void> {
-    const alternativeEndpoints = [
-      'wss://pumpportal.fun/api/data',
-      'wss://frontend-api.pump.fun/ws',
-      'wss://api.pump.fun/v1/ws'
-    ];
+  /**
+   * Start periodic graduation tracking
+   */
+  private startGraduationTracking(): void {
+    this.graduationCheckInterval = setInterval(async () => {
+      await this.checkGraduationCandidates();
+    }, this.GRADUATION_CHECK_INTERVAL);
 
-    for (const endpoint of alternativeEndpoints) {
+    // Run initial check
+    this.checkGraduationCandidates();
+  }
+
+  /**
+   * Check all tracked tokens for graduation progress
+   */
+  private async checkGraduationCandidates(): Promise<void> {
+    const candidates: GraduationCandidate[] = [];
+
+    for (const [tokenAddress, previousData] of this.trackedTokens) {
       try {
-        await this.connectWebSocket(endpoint);
-        logger.info(`Connected to PumpFun WebSocket: ${endpoint}`);
-        break;
+        const bondingCurve = previousData.bondingCurve || 
+          await this.getBondingCurveAddress(tokenAddress);
+          
+        if (!bondingCurve) continue;
+
+        const curveState = await this.curveManager.getCurveState(bondingCurve);
+        
+        // Calculate graduation metrics
+        const candidate: GraduationCandidate = {
+          tokenAddress,
+          symbol: previousData.symbol,
+          name: previousData.name,
+          bondingCurve: bondingCurve,
+          curveProgress: curveState.progress,
+          currentSolReserves: curveState.solReserves,
+          targetSolReserves: this.GRADUATION_SOL_THRESHOLD,
+          distanceToGraduation: this.GRADUATION_MARKET_CAP_USD - (curveState.marketCapSol * curveState.solPriceUSD),
+          currentPrice: curveState.price,
+          marketCapUSD: curveState.marketCapSol * curveState.solPriceUSD,
+          targetMarketCapUSD: this.GRADUATION_MARKET_CAP_USD,
+        };
+
+        // Estimate time to graduation based on recent market cap growth
+        if (previousData.marketCapUSD) {
+          const marketCapGrowthRate = (candidate.marketCapUSD - previousData.marketCapUSD) / 
+            (this.GRADUATION_CHECK_INTERVAL / 1000 / 60); // USD per minute
+          
+          if (marketCapGrowthRate > 0) {
+            candidate.estimatedTimeToGraduation = 
+              candidate.distanceToGraduation / marketCapGrowthRate; // minutes
+          }
+        }
+
+        // Calculate price at graduation (rough estimate based on current trajectory)
+        const percentToGraduation = (candidate.marketCapUSD / this.GRADUATION_MARKET_CAP_USD) * 100;
+        const priceMultiplier = this.GRADUATION_MARKET_CAP_USD / candidate.marketCapUSD;
+        candidate.priceAtGraduation = curveState.price * Math.sqrt(priceMultiplier); // Square root for bonding curve math
+
+        // Update tracked data
+        this.trackedTokens.set(tokenAddress, candidate);
+
+        // Check if nearing graduation based on market cap
+        const graduationPercentage = (candidate.marketCapUSD / this.GRADUATION_MARKET_CAP_USD) * 100;
+        
+        if (graduationPercentage >= 70) {
+          candidates.push(candidate);
+          
+          // Emit graduation alert at different thresholds
+          if (graduationPercentage >= 90) {
+            this.emitGraduationAlert(candidate, 'IMMINENT');
+          } else if (graduationPercentage >= 80) {
+            this.emitGraduationAlert(candidate, 'APPROACHING');
+          }
+        }
+
+        // Update database
+        await this.updateTokenGraduationData(tokenAddress, candidate);
+
       } catch (error) {
-        logger.debug(`Failed to connect to ${endpoint}, trying next...`);
+        logger.error(`Error checking graduation for ${tokenAddress}:`, error);
       }
     }
+
+    // Emit graduation candidates update
+    if (candidates.length > 0) {
+      this.emit('graduationCandidates', candidates);
+      logger.info(`Found ${candidates.length} tokens nearing graduation`);
+    }
   }
 
-  private async connectWebSocket(url: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(new Error('WebSocket connection timeout'));
-      }, 10000);
+  /**
+   * Add token to graduation tracking
+   */
+  private async addTokenToGraduationTracking(token: any): Promise<void> {
+    try {
+      const bondingCurve = token.bonding_curve || token.bondingCurve || token.bondingCurveKey;
+      if (!bondingCurve) {
+        logger.debug('No bonding curve address for token:', token.symbol);
+        return;
+      }
 
-      ws.on('open', () => {
-        clearTimeout(timeout);
-        this.ws = ws;
+      // Try to get curve state with retry logic
+      let curveState;
+      let retries = 3;
+      
+      while (retries > 0) {
+        try {
+          curveState = await this.curveManager.getCurveState(bondingCurve);
+          break; // Success, exit loop
+        } catch (error) {
+          retries--;
+          if (retries === 0) {
+            logger.debug(`Could not fetch curve state for ${token.symbol} after retries:`, error);
+            
+            // Use data from WebSocket if available
+            if (token.marketCapSol) {
+              const marketCapUSD = token.marketCapSol * 180; // Approximate
+              if (marketCapUSD > 5000) {
+                // Add with basic data
+                const candidate: GraduationCandidate = {
+                  tokenAddress: token.address || token.mint,
+                  symbol: token.symbol,
+                  name: token.name,
+                  bondingCurve: bondingCurve,
+                  curveProgress: 0, // Unknown
+                  currentSolReserves: 0, // Unknown
+                  targetSolReserves: this.GRADUATION_SOL_THRESHOLD,
+                  distanceToGraduation: this.GRADUATION_MARKET_CAP_USD - marketCapUSD,
+                  currentPrice: 0, // Unknown
+                  marketCapUSD: marketCapUSD,
+                  targetMarketCapUSD: this.GRADUATION_MARKET_CAP_USD,
+                };
+                
+                this.trackedTokens.set(token.address || token.mint, candidate);
+                logger.info(`Added ${token.symbol} to graduation tracking (from WebSocket data) - $${marketCapUSD.toFixed(0)} market cap`);
+              }
+            }
+            return;
+          }
+          
+          // Wait before retry
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      
+      if (!curveState) return;
+      
+      const marketCapUSD = curveState.marketCapSol * curveState.solPriceUSD;
+      
+      // Track tokens that have at least $5,000 market cap (about 7% of graduation)
+      if (marketCapUSD > 5000) {
+        const candidate: GraduationCandidate = {
+          tokenAddress: token.address || token.mint,
+          symbol: token.symbol,
+          name: token.name,
+          bondingCurve: bondingCurve,
+          curveProgress: curveState.progress,
+          currentSolReserves: curveState.solReserves,
+          targetSolReserves: this.GRADUATION_SOL_THRESHOLD,
+          distanceToGraduation: this.GRADUATION_MARKET_CAP_USD - marketCapUSD,
+          currentPrice: curveState.price,
+          marketCapUSD: marketCapUSD,
+          targetMarketCapUSD: this.GRADUATION_MARKET_CAP_USD,
+        };
         
-        // Try different subscription methods
-        ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
-        ws.send(JSON.stringify({ method: 'subscribe', type: 'tokens' }));
+        this.trackedTokens.set(token.address || token.mint, candidate);
+
+        const percentageToGraduation = (marketCapUSD / this.GRADUATION_MARKET_CAP_USD) * 100;
+        logger.info(`Added ${token.symbol} to graduation tracking - $${marketCapUSD.toFixed(0)} market cap (${percentageToGraduation.toFixed(1)}% of graduation)`);
+      }
+    } catch (error) {
+      logger.error(`Error adding token to graduation tracking:`, error);
+    }
+  }
+
+  /**
+   * Emit graduation alert
+   */
+  private emitGraduationAlert(candidate: GraduationCandidate, level: 'APPROACHING' | 'IMMINENT'): void {
+    const marketCapPercentage = (candidate.marketCapUSD / this.GRADUATION_MARKET_CAP_USD) * 100;
+    
+    const alert = {
+      type: level === 'IMMINENT' ? 'GRADUATION_IMMINENT' : 'GRADUATION_APPROACHING',
+      level,
+      tokenAddress: candidate.tokenAddress,
+      symbol: candidate.symbol,
+      name: candidate.name,
+      marketCapUSD: candidate.marketCapUSD,
+      targetMarketCapUSD: this.GRADUATION_MARKET_CAP_USD,
+      percentageToGraduation: marketCapPercentage,
+      distanceToGraduation: candidate.distanceToGraduation,
+      estimatedTimeMinutes: candidate.estimatedTimeToGraduation,
+      currentPrice: candidate.currentPrice,
+      estimatedPriceAtGraduation: candidate.priceAtGraduation,
+      timestamp: new Date(),
+    };
+
+    this.emit('graduationAlert', alert);
+    
+    const emoji = level === 'IMMINENT' ? '🚨' : '⚠️';
+    logger.warn(`${emoji} GRADUATION ${level}: ${candidate.symbol} at $${candidate.marketCapUSD.toFixed(0)} (${marketCapPercentage.toFixed(1)}% of target) - $${candidate.distanceToGraduation.toFixed(0)} to go!`);
+  }
+
+  /**
+   * Update token graduation data in database
+   */
+  private async updateTokenGraduationData(tokenAddress: string, candidate: GraduationCandidate): Promise<void> {
+    try {
+      await db('tokens')
+        .where('address', tokenAddress)
+        .update({
+          curve_progress: candidate.curveProgress,
+          market_cap: candidate.marketCapUSD,
+          price: candidate.currentPrice,
+          distance_to_graduation: candidate.distanceToGraduation, // Now in USD
+          estimated_graduation_time: candidate.estimatedTimeToGraduation 
+            ? Math.round(candidate.estimatedTimeToGraduation * 100) / 100 // Round to 2 decimal places
+            : null,
+          updated_at: new Date(),
+        });
+
+    // Store graduation tracking snapshot - use created_at instead of timestamp
+      await db('pump_fun_curve_snapshots').insert({
+        token_address: tokenAddress,
+        created_at: new Date(), // Changed from 'timestamp' to 'created_at'
+        sol_reserves: candidate.currentSolReserves,
+        curve_progress: candidate.curveProgress,
+        price: candidate.currentPrice, // Now this column exists
+        distance_to_graduation: candidate.distanceToGraduation, // USD distance
+        market_cap_usd: candidate.marketCapUSD, // Add market cap for tracking
+      });
+    } catch (error: any) {
+      logger.error('Error updating graduation data:', error);
+    // If insert fails, try without created_at (it might have a default)
+      if (error.code === '42703') {
+        try {
+          await db('pump_fun_curve_snapshots').insert({
+            token_address: tokenAddress,
+            sol_reserves: candidate.currentSolReserves,
+            curve_progress: candidate.curveProgress,
+            price: candidate.currentPrice,
+            distance_to_graduation: candidate.distanceToGraduation,
+            market_cap_usd: candidate.marketCapUSD,
+          // created_at will use default value
+          });
+        } catch (retryError) {
+          logger.error('Retry also failed:', retryError);
+        }
+        }
+    }
+  }
+  
+            /**
+   * Get bonding curve address for a token
+   */
+  private async getBondingCurveAddress(tokenAddress: string): Promise<string | null> {
+    const token = await db('tokens')
+      .where('address', tokenAddress)
+      .first();
+    
+    return token?.bonding_curve || null;
+  }
+
+  private async connectWebSocket(): Promise<void> {
+    const wsUrl = config.discovery.pumpfunWsUrl || 'wss://pumpportal.fun/api/data';
+    
+    try {
+      this.ws = new WebSocket(wsUrl);
+      
+      this.ws.on('open', () => {
+        logger.info('Connected to PumpFun WebSocket');
         
-        // Set up ping to keep connection alive
+        // Correct subscription format - pump.fun wants 'keys' parameter
+        this.ws?.send(JSON.stringify({
+          method: 'subscribeNewToken',
+          keys: [] // Empty array subscribes to all new tokens
+        }));
+
+        // Also subscribe to trades if needed
+        this.ws?.send(JSON.stringify({
+          method: 'subscribeTokenTrade',
+          keys: [] // Empty array for all trades
+        }));
+        
+        // Set up ping interval
         this.pingInterval = setInterval(() => {
           if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.ping();
           }
         }, 30000);
-        
-        resolve();
       });
 
-      ws.on('message', (data: Buffer) => {
+      this.ws.on('message', async (data: Buffer) => {
         try {
-          const message = JSON.parse(data.toString());
-          this.handleMessage(message);
+          const messageStr = data.toString();
+          const message = JSON.parse(messageStr);
+          
+          // Skip error messages
+          if (message.errors) {
+            return;
+          }
+          
+          // Handle token creation - pump.fun uses txType: "create"
+          if (message.txType === 'create' && message.mint) {
+            logger.debug('New token creation detected:', {
+              mint: message.mint,
+              symbol: message.symbol,
+              name: message.name,
+              marketCapSol: message.marketCapSol
+            });
+            
+            await this.handleNewToken(message);
+          }
+          
+          // Handle token trades
+          else if ((message.txType === 'buy' || message.txType === 'sell') && message.mint) {
+            await this.handleTokenTrade(message);
+          }
+          
         } catch (error) {
-          logger.debug('Failed to parse WebSocket message');
+          logger.error('Error processing WebSocket message:', error);
         }
       });
 
-      ws.on('error', (error) => {
-        clearTimeout(timeout);
-        reject(error);
+      this.ws.on('error', (error) => {
+        logger.error('WebSocket error:', error);
       });
 
-      ws.on('close', () => {
-        logger.debug(`WebSocket ${url} closed`);
+      this.ws.on('close', () => {
+        logger.info('WebSocket connection closed');
         if (this.pingInterval) {
           clearInterval(this.pingInterval);
           this.pingInterval = null;
         }
-      });
-
-      ws.on('pong', () => {
-        logger.debug('PumpFun WebSocket pong received');
-      });
-    });
-  }
-
-  private handleMessage(message: any): void {
-    if (message.type === 'tokenCreate' || message.type === 'create' || message.type === 'newToken') {
-      const tokenData = message.data || message;
-      
-      const token: TokenDiscovery = {
-        address: tokenData.mint || tokenData.address || tokenData.tokenAddress,
-        symbol: tokenData.symbol || 'UNKNOWN',
-        name: tokenData.name || 'Unknown Token',
-        platform: 'pumpfun',
-        createdAt: new Date(tokenData.created_timestamp || tokenData.timestamp || Date.now()),
-        metadata: {
-          creator: tokenData.creator,
-          description: tokenData.description,
-          imageUri: tokenData.image_uri || tokenData.imageUri,
-          bondingCurve: tokenData.bonding_curve || tokenData.bondingCurve,
-          marketCap: tokenData.usd_market_cap || tokenData.marketCap,
-          method: 'websocket'
-        },
-      };
-
-      this.emitTokenDiscovery(token);
-    }
-  }
-
-  private startHttpPolling(): void {
-    // Poll every 30 seconds as backup
-    this.httpPollInterval = setInterval(async () => {
-      await this.pollRecentTokens();
-    }, 30000);
-
-    // Initial poll
-    this.pollRecentTokens();
-  }
-
-  // Novel Approach 3: Use pump.fun website API endpoints
-  private async pollAlternativeEndpoints(): Promise<void> {
-    const endpoints = [
-      'https://frontend-api.pump.fun/coins/created',
-      'https://api.pump.fun/tokens/recent',
-      'https://pump.fun/api/tokens'
-    ];
-
-    for (const endpoint of endpoints) {
-      try {
-        const response = await axios.get(endpoint, { 
-          timeout: 5000,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          }
-        });
         
-        if (response.data) {
-          logger.info(`Found working endpoint: ${endpoint}`);
-          // Process tokens from response
-          return;
+        // Attempt reconnection after delay
+        if (this.isRunning) {
+          setTimeout(() => this.connectWebSocket(), 5000);
         }
-      } catch (error) {
-        // Silent fail, try next
-      }
-    }
-  }
-
-  private async processTransactionForToken(signature: string): Promise<void> {
-    try {
-      logger.debug(`Fetching transaction: ${signature}`);
-      const tx = await this.connection.getParsedTransaction(signature, {
-        maxSupportedTransactionVersion: 0
       });
-
-      if (!tx || !tx.meta) {
-        logger.debug('Transaction not found or no metadata');
-        return;
-      }
-
-      logger.debug(`Transaction has ${tx.transaction.message.instructions.length} instructions`);
-
-      // Look for token creation in different ways
-      let tokenFound = false;
-
-      // Method 1: Check parsed instructions
-      for (const [index, instruction] of tx.transaction.message.instructions.entries()) {
-        if ('parsed' in instruction) {
-          logger.debug(`Instruction ${index} type: ${instruction.parsed?.type}`);
-          
-          if (instruction.parsed?.type === 'create' || 
-              instruction.parsed?.type === 'initializeMint' ||
-              instruction.parsed?.type === 'createAccount') {
-            
-            const info = instruction.parsed.info;
-            logger.debug(`Parsed instruction info:`, info);
-            
-            // Try to find mint address
-            const mint = info.mint || info.account || info.newAccount;
-            if (mint) {
-              logger.info(`Found token mint via parsed instruction: ${mint}`);
-              tokenFound = true;
-              
-              const token: TokenDiscovery = {
-                address: mint,
-                symbol: 'PUMP',
-                name: 'PumpFun Token',
-                platform: 'pumpfun',
-                createdAt: new Date(),
-                metadata: {
-                  signature,
-                  method: 'blockchain'
-                }
-              };
-
-              this.emitTokenDiscovery(token);
-            }
-          }
-        }
-      }
-
-      // Method 2: Check post token balances for new tokens
-      if (!tokenFound && tx.meta.postTokenBalances && tx.meta.postTokenBalances.length > 0) {
-        for (const balance of tx.meta.postTokenBalances) {
-          if (balance.uiTokenAmount.uiAmount && balance.uiTokenAmount.uiAmount > 0) {
-            const mint = balance.mint;
-            logger.info(`Found token mint via postTokenBalances: ${mint}`);
-            
-            const token: TokenDiscovery = {
-              address: mint,
-              symbol: 'PUMP',
-              name: 'PumpFun Token',
-              platform: 'pumpfun',
-              createdAt: new Date(),
-              metadata: {
-                signature,
-                method: 'blockchain-balance'
-              }
-            };
-
-            this.emitTokenDiscovery(token);
-            tokenFound = true;
-            break;
-          }
-        }
-      }
-
-      // Method 3: Check account keys for new accounts
-      if (!tokenFound) {
-        const accountKeys = tx.transaction.message.accountKeys;
-        logger.debug(`Transaction has ${accountKeys.length} account keys`);
-        
-        // PumpFun tokens often have specific patterns in account keys
-        for (const [index, key] of accountKeys.entries()) {
-          logger.debug(`Account ${index}: ${key.pubkey.toString()}, writable: ${key.writable}, signer: ${key.signer}`);
-        }
-      }
-
-      if (!tokenFound) {
-        logger.warn(`Could not extract token from transaction: ${signature}`);
-      }
 
     } catch (error) {
-      logger.error('Error processing PumpFun transaction:', error);
+      logger.error('Failed to connect WebSocket:', error);
     }
   }
 
-  // Add this method to emit a token even without full details
-  private emitDetectedToken(signature: string): void {
-    const token: TokenDiscovery = {
-      address: signature.substring(0, 44), // Use part of signature as temporary address
-      symbol: 'PUMP-NEW',
-      name: `PumpFun Token ${Date.now()}`,
+  /**
+   * Handle new token from WebSocket
+   */
+  private async handleNewToken(message: any): Promise<void> {
+    // pump.fun sends the token data directly in the message
+    const tokenData = message;
+    
+    // Validate we have minimum required data
+    if (!tokenData.mint) {
+      logger.debug('No mint address in token data');
+      return;
+    }
+
+    // pump.fun provides bondingCurveKey directly
+    const bondingCurve = tokenData.bondingCurveKey;
+    if (!bondingCurve) {
+      logger.error('No bonding curve key in token data');
+      return;
+    }
+
+    const enhancedToken: EnhancedTokenDiscovery = {
+      address: tokenData.mint,
+      symbol: tokenData.symbol || 'UNKNOWN',
+      name: tokenData.name || `Token ${tokenData.mint.slice(0, 6)}`,
       platform: 'pumpfun',
       createdAt: new Date(),
+      bondingCurve: bondingCurve,
+      associatedBondingCurve: this.deriveAssociatedBondingCurve(tokenData.mint, bondingCurve),
+      creator: tokenData.traderPublicKey, // The initial buyer is often the creator
+      creatorVault: await this.deriveCreatorVault(tokenData.traderPublicKey),
       metadata: {
-        signature,
-        method: 'blockchain-detection',
-        needsEnrichment: true
-      }
+        description: '',
+        imageUri: tokenData.uri,
+        method: 'websocket',
+        signature: tokenData.signature,
+        initialBuy: tokenData.initialBuy,
+        initialSolAmount: tokenData.solAmount,
+        virtualSolReserves: tokenData.vSolInBondingCurve,
+        virtualTokenReserves: tokenData.vTokensInBondingCurve,
+        marketCapSol: tokenData.marketCapSol,
+        pool: tokenData.pool,
+      },
     };
 
-    logger.info(`Emitting detected token from signature: ${signature}`);
-    this.emitTokenDiscovery(token);
+    // Calculate initial price from the virtual reserves
+    if (tokenData.vSolInBondingCurve && tokenData.vTokensInBondingCurve) {
+      // Price = SOL reserves / token reserves (adjusted for decimals)
+      enhancedToken.initialPrice = tokenData.vSolInBondingCurve / (tokenData.vTokensInBondingCurve / 1_000_000);
+      enhancedToken.virtualSolReserves = tokenData.vSolInBondingCurve;
+      enhancedToken.virtualTokenReserves = tokenData.vTokensInBondingCurve;
+    }
+
+    // Calculate market cap in USD
+    const solPriceUSD = 180; // You should get this from your price feed
+    const marketCapUSD = (tokenData.marketCapSol || 0) * solPriceUSD;
+    
+    logger.info(`New PumpFun token: ${enhancedToken.symbol} (${enhancedToken.name}) - Market Cap: $${marketCapUSD.toFixed(0)}`);
+    
+    // Add to graduation tracking if it has decent market cap
+    if (marketCapUSD > 1000) { // Track tokens >$1k market cap
+      await this.addTokenToGraduationTracking({
+        address: enhancedToken.address,
+        symbol: enhancedToken.symbol,
+        name: enhancedToken.name,
+        bonding_curve: enhancedToken.bondingCurve,
+        bondingCurveKey: enhancedToken.bondingCurve,
+        marketCapSol: tokenData.marketCapSol,
+      });
+    }
+    
+    this.emitEnhancedTokenDiscovery(enhancedToken);
+  }
+
+  /**
+   * Handle token trade from WebSocket
+   */
+  private async handleTokenTrade(message: any): Promise<void> {
+    if (!message.mint || !this.trackedTokens.has(message.mint)) {
+      return;
+    }
+
+    // Log trade activity
+    logger.debug(`Trade activity on tracked token: ${message.mint}`, {
+      type: message.txType,
+      amount: message.solAmount,
+      trader: message.traderPublicKey
+    });
+    
+    // Force a graduation check for active tokens
+    const candidate = this.trackedTokens.get(message.mint);
+    if (candidate && candidate.marketCapUSD > 50000) { // >$50k market cap
+      await this.checkGraduationCandidates();
+    }
+  }
+
+  private deriveAssociatedBondingCurve(mint: string, bondingCurve: string): string {
+    try {
+      const mintPubkey = new PublicKey(mint);
+      const bondingCurvePubkey = new PublicKey(bondingCurve);
+      
+      const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+      const ASSOCIATED_TOKEN_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+      
+      const [associatedAddress] = PublicKey.findProgramAddressSync(
+        [
+          bondingCurvePubkey.toBuffer(),
+          TOKEN_PROGRAM.toBuffer(),
+          mintPubkey.toBuffer(),
+        ],
+        ASSOCIATED_TOKEN_PROGRAM
+      );
+      
+      return associatedAddress.toString();
+    } catch (error) {
+      logger.error('Error deriving associated bonding curve:', error);
+      return bondingCurve; // Fallback
+    }
+  }
+
+  private async deriveCreatorVault(creator: string): Promise<string> {
+    try {
+      const creatorPubkey = new PublicKey(creator);
+      const [vaultPubkey] = await PublicKey.findProgramAddress(
+        [
+          Buffer.from('creator-vault'),
+          creatorPubkey.toBuffer()
+        ],
+        this.PUMP_FUN_PROGRAM
+      );
+      return vaultPubkey.toString();
+    } catch (error) {
+      logger.error('Error deriving creator vault:', error);
+      return creator; // Fallback
+    }
+  }
+
+  protected emitEnhancedTokenDiscovery(token: EnhancedTokenDiscovery): void {
+    // Filter out tokens without proper data
+    if (!token.symbol || !token.name || 
+        token.symbol === 'UNKNOWN' || 
+        token.name.includes('Token ')) {
+      logger.debug('Token has incomplete data but emitting anyway for tracking');
+    }
+
+    logger.info(`Enhanced token discovery: ${token.symbol} - Initial Price: ${token.initialPrice?.toFixed(8) || 'N/A'} SOL`);
+    
+    // Emit as regular TokenDiscovery for compatibility
+    const basicToken: TokenDiscovery = {
+      address: token.address,
+      symbol: token.symbol,
+      name: token.name,
+      platform: token.platform,
+      createdAt: token.createdAt,
+      metadata: {
+        ...token.metadata,
+        bondingCurve: token.bondingCurve,
+        associatedBondingCurve: token.associatedBondingCurve,
+        creator: token.creator,
+        creatorVault: token.creatorVault,
+        initialPrice: token.initialPrice,
+        initialLiquidity: token.initialLiquidity,
+        curveProgress: token.curveProgress,
+      },
+    };
+
+    this.emit('tokenDiscovered', basicToken);
+    
+    // Also emit enhanced version for components that can use it
+    this.emit('enhancedTokenDiscovered', token);
+  }
+
+  /**
+   * Get current graduation candidates
+   */
+  public getGraduationCandidates(minMarketCapUSD: number = 35000): GraduationCandidate[] {
+    const candidates: GraduationCandidate[] = [];
+    
+    for (const candidate of this.trackedTokens.values()) {
+      if (candidate.marketCapUSD >= minMarketCapUSD) {
+        candidates.push(candidate);
+      }
+    }
+    
+    // Sort by market cap (closest to graduation first)
+    return candidates.sort((a, b) => b.marketCapUSD - a.marketCapUSD);
   }
 
   protected async stopMonitoring(): Promise<void> {
+    if (this.subscriptionId !== null) {
+      await this.connection.removeOnLogsListener(this.subscriptionId);
+      this.subscriptionId = null;
+    }
+
     if (this.ws) {
       this.ws.close();
       this.ws = null;
-    }
-
-    if (this.httpPollInterval) {
-      clearInterval(this.httpPollInterval);
-      this.httpPollInterval = null;
     }
 
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
     }
-  }
 
-  private async pollRecentTokens(): Promise<void> {
-    // First try the alternative endpoints
-    await this.pollAlternativeEndpoints();
-    
-    // Then try the original endpoint
-    try {
-      const response = await axios.get(
-        `${config.discovery.pumpfunApiUrl}/coins/recently-created`,
-        {
-          params: { limit: 50 },
-          timeout: 10000,
-        }
-      );
-
-      const tokens: PumpFunToken[] = response.data;
-      
-      for (const tokenData of tokens) {
-        const token: TokenDiscovery = {
-          address: tokenData.mint,
-          symbol: tokenData.symbol,
-          name: tokenData.name,
-          platform: 'pumpfun',
-          createdAt: new Date(tokenData.created_timestamp),
-          metadata: {
-            creator: tokenData.creator,
-            description: tokenData.description,
-            imageUri: tokenData.image_uri,
-            bondingCurve: tokenData.bonding_curve,
-            marketCap: tokenData.usd_market_cap,
-            method: 'http'
-          },
-        };
-
-        this.emitTokenDiscovery(token);
-      }
-
-      logger.debug(`Polled ${tokens.length} tokens from PumpFun API`);
-    } catch (error: any) {
-      if (error.response?.status !== 503) {
-        logger.debug('PumpFun API error:', error.response?.status);
-      }
+    if (this.graduationCheckInterval) {
+      clearInterval(this.graduationCheckInterval);
+      this.graduationCheckInterval = null;
     }
   }
 }

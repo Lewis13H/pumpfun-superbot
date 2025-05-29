@@ -1,46 +1,60 @@
+// src/api/server.ts - Exports the Express app for use in index.ts
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import { createServer } from 'http';
-import { Server } from 'socket.io';
-import { config } from '../config';
-import { logger } from '../utils/logger';
+import apiRoutes from './routes';
 import { errorHandler } from './middleware/errorHandler';
 import { requestLogger } from './middleware/requestLogger';
-import { setupWebSocket } from './websocket/socketHandler';
-import apiRoutes from './routes';
 
-const app = express();
-const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: {
-    origin: "http://localhost:3001", // Your frontend URL
-    methods: ["GET", "POST"]
-  }
-});
-// After creating io
-setupWebSocket(io);
+// Create and configure Express app
+export const app = express();
 
-// Middleware
+// Setup middleware
 app.use(helmet());
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  credentials: true
+}));
 app.use(compression());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(requestLogger);
-app.use('/api', apiRoutes);
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date() });
+// Routes
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
 });
 
+// API routes
+app.use('/api', apiRoutes);
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Route ${req.method} ${req.path} not found`
+  });
+});
+
+// Error handling
 app.use(errorHandler);
 
-// Start server
-//const PORT = config.port || 3000;
-//httpServer.listen(PORT, () => {
-//  logger.info(`API Server running on port ${PORT}`);
-//});
+// You can optionally export the ApiServer class if needed elsewhere
+export class ApiServer {
+  private app: express.Application;
+  private port: number;
 
-export { app, io, httpServer };
+  constructor(port: number) {
+    this.app = app;
+    this.port = port;
+  }
+
+  getApp(): express.Application {
+    return this.app;
+  }
+}

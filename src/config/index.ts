@@ -23,9 +23,17 @@ const envSchema = Joi.object({
   BIRDEYE_API_KEY: Joi.string().required(),
   MORALIS_API_KEY: Joi.string().required(),
 
-  //validation schema
+  // PumpFun specific
   PUMPFUN_WS_URL: Joi.string().default('wss://pumpportal.fun/api/data'),
   PUMPFUN_API_URL: Joi.string().default('https://frontend-api.pump.fun'),
+  PUMPFUN_PRIMARY_METHOD: Joi.string().valid('logs', 'blocks', 'websocket').default('logs'),
+  PUMPFUN_MIN_LIQUIDITY: Joi.number().default(0.1),
+  PUMPFUN_MIN_HOLDERS: Joi.number().default(10),
+  PUMPFUN_MAX_TOKEN_AGE: Joi.number().default(300), // 5 minutes
+  PUMPFUN_MAX_CREATOR_TOKENS_DAILY: Joi.number().default(5),
+  PUMPFUN_MIN_CREATOR_REPUTATION: Joi.number().min(0).max(1).default(0.5),
+  
+  // Discovery
   RAYDIUM_PROGRAM_ID: Joi.string().default('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'),
   MAX_CONCURRENT_PROCESSING: Joi.number().default(10),
   DISCOVERY_QUEUE_SIZE: Joi.number().default(1000),
@@ -67,13 +75,100 @@ export const config = {
     solsnifferApiKey: envVars.SOLSNIFFER_API_KEY,
     birdeyeApiKey: envVars.BIRDEYE_API_KEY,
     moralisApiKey: envVars.MORALIS_API_KEY,
+    rateLimit: {
+      maxRequestsPerMinute: 30,
+      retryDelays: [1000, 2000, 4000], // milliseconds
+    }  
   },
 
   discovery: {
-  pumpfunWsUrl: envVars.PUMPFUN_WS_URL,
-  pumpfunApiUrl: envVars.PUMPFUN_API_URL,
-  raydiumProgramId: envVars.RAYDIUM_PROGRAM_ID,
-  maxConcurrentProcessing: envVars.MAX_CONCURRENT_PROCESSING,
-  discoveryQueueSize: envVars.DISCOVERY_QUEUE_SIZE,
+    pumpfunWsUrl: envVars.PUMPFUN_WS_URL,
+    pumpfunApiUrl: envVars.PUMPFUN_API_URL,
+    raydiumProgramId: envVars.RAYDIUM_PROGRAM_ID,
+    maxConcurrentProcessing: envVars.MAX_CONCURRENT_PROCESSING,
+    discoveryQueueSize: envVars.DISCOVERY_QUEUE_SIZE,
+    
+    // PumpFun enhanced settings
+    pumpfun: {
+      // WebSocket endpoints to try in order
+      wsEndpoints: [
+        envVars.PUMPFUN_WS_URL,
+        'wss://frontend-api.pump.fun/ws',
+      ],
+      
+      // Monitoring preferences
+      primaryMethod: envVars.PUMPFUN_PRIMARY_METHOD,
+      enableFallback: true,
+      
+      // Discovery filters
+      minLiquidity: envVars.PUMPFUN_MIN_LIQUIDITY,
+      minHolders: envVars.PUMPFUN_MIN_HOLDERS,
+      maxTokenAge: envVars.PUMPFUN_MAX_TOKEN_AGE,
+      
+      // Bonding curve constants
+      raydiumMigrationThreshold: 69420, // SOL required for migration
+      tokenDecimals: 6, // pump.fun uses 6 decimals
+      
+      // Creator filtering
+      maxCreatorTokensPerDay: envVars.PUMPFUN_MAX_CREATOR_TOKENS_DAILY,
+      minCreatorReputation: envVars.PUMPFUN_MIN_CREATOR_REPUTATION,
+      blacklistedCreators: [], // Can be loaded from DB or env
+      
+      // Performance tuning
+      curveDataCacheTTL: 30000, // 30 seconds
+      maxRetries: 3,
+      retryDelay: 1000,
+    },
+  },
+  
+  // Analysis configuration with pump.fun enhancements
+  analysis: {
+    // Standard weights
+    weights: {
+      safety: 0.3,
+      liquidity: 0.25,
+      community: 0.2,
+      momentum: 0.15,
+      potential: 0.1,
+    },
+    
+    // PumpFun specific analysis weights
+    pumpfunWeights: {
+      curveHealth: 0.2,
+      migrationPotential: 0.15,
+      creatorReputation: 0.15,
+      initialLiquidity: 0.25,
+      priceStability: 0.25,
+    },
+    
+    // Classification thresholds
+    thresholds: {
+      strongBuy: 0.8,
+      buy: 0.65,
+      consider: 0.5,
+      monitor: 0.35,
+      avoid: 0.2,
+    },
+    
+    // PumpFun specific thresholds
+    pumpfunThresholds: {
+      minCurveProgress: 5, // Minimum % progress to consider
+      healthyReserveRatio: 0.8, // Virtual/real reserves ratio
+      suspiciousVolumeSpike: 10, // 10x average volume
+      rugPullLiquidityDrop: 0.5, // 50% liquidity drop
+    },
+  },
+  
+  // System paths
+  paths: {
+    idl: path.join(__dirname, '../../idl'),
+    data: path.join(__dirname, '../../data'),
+    logs: path.join(__dirname, '../../logs'),
+    cache: path.join(__dirname, '../../cache'),
   },
 };
+
+// Export types for better IDE support
+export type Config = typeof config;
+export type PumpFunConfig = typeof config.discovery.pumpfun;
+export type AnalysisConfig = typeof config.analysis;

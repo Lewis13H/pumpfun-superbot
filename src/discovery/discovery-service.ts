@@ -1,343 +1,193 @@
-// src/discovery/discovery-service.ts - Updated for Module 2B1
-import { EventEmitter } from 'events';
-import { DiscoveryManager } from './discovery-manager';
-import { TokenProcessor } from './token-processor';
-import { DeduplicationService } from './deduplication-service';
-import { PumpFunMonitor } from './pumpfun-monitor';
-import { RaydiumMonitor } from './raydium-monitor';
-import { EnhancedTokenAnalyzer } from '../analysis/enhanced-token-analyzer';
-import { MarketMetricsAnalyzer } from '../analysis/market-metrics-analyzer';
+// src/discovery/discovery-service.ts
 import { logger } from '../utils/logger';
+import { FilteredDiscoveryManager } from './filtered-discovery-manager';
+import { EnhancedPumpFunMonitor as PumpFunMonitor } from './pumpfun-monitor';
+import { RaydiumMonitor } from './raydium-monitor';
+import { EnhancedTokenProcessor } from './enhanced-token-processor';
 import { db } from '../database/postgres';
 
-export class DiscoveryService extends EventEmitter {
-  private discoveryManager: DiscoveryManager;
-  private tokenProcessor: TokenProcessor;
-  private deduplicationService: DeduplicationService;
-  private enhancedAnalyzer: EnhancedTokenAnalyzer;
-  private marketAnalyzer: MarketMetricsAnalyzer;
+class DiscoveryService {
+  private discoveryManager: FilteredDiscoveryManager;
+  private tokenProcessor: EnhancedTokenProcessor;
   private isRunning: boolean = false;
 
   constructor() {
-    super();
-    this.discoveryManager = new DiscoveryManager();
-    this.tokenProcessor = new TokenProcessor();
-    this.deduplicationService = new DeduplicationService();
-    this.enhancedAnalyzer = new EnhancedTokenAnalyzer();
-    this.marketAnalyzer = new MarketMetricsAnalyzer();
+    this.discoveryManager = new FilteredDiscoveryManager();
+    this.tokenProcessor = new EnhancedTokenProcessor();
   }
 
   async initialize(): Promise<void> {
-    logger.info('Initializing Discovery Service with Enhanced Analysis');
-
-    // Initialize discovery manager
+    logger.info('Initializing Discovery Service with Smart Filtering...');
+    
     await this.discoveryManager.initialize();
-
-    // Initialize analyzers
-    await this.enhancedAnalyzer.start();
-    await this.marketAnalyzer.start();
-
-    // Set up event handlers
-    this.setupEventHandlers();
-
+    // TokenProcessor doesn't have initialize method, so skip it
+    
+    // Connect components
+    this.discoveryManager.on('tokenDiscovered', async (tokenData) => {
+      logger.info(`Processing active token: ${tokenData.symbol} with MC=$${tokenData.marketData?.marketCap || 0}`);
+      // Use addToken instead of queueToken
+      await this.tokenProcessor.addToken(tokenData, 80); // High priority for filtered tokens
+    });
+    
     // Register monitors
-    this.discoveryManager.registerMonitor(new PumpFunMonitor());
-    this.discoveryManager.registerMonitor(new RaydiumMonitor());
-
-    logger.info('Discovery Service with Enhanced Analysis initialized');
-  }
-
-  private setupEventHandlers(): void {
-    // Handle discovered tokens
-    this.discoveryManager.on('tokenDiscovered', async (token) => {
-      // Check for duplicates
-      if (this.deduplicationService.isDuplicate(token.address, token.platform)) {
-        logger.debug(`Duplicate token filtered: ${token.address}`);
-        return;
-      }
-
-      // Calculate priority based on platform and age
-      const priority = this.calculatePriority(token);
-
-      // Add to processing queue
-      await this.tokenProcessor.addToken(token, priority);
-    });
-
-    // Handle processed tokens - now with enhanced analysis
-    this.tokenProcessor.on('tokenReady', async (token) => {
-      logger.info(`Token ready for enhanced analysis: ${token.symbol} (${token.address})`);
-      
-      try {
-        // Perform enhanced analysis
-        const analysis = await this.enhancedAnalyzer.analyzeToken(token);
-        
-        logger.info(`Enhanced analysis completed for ${token.symbol}: ${analysis.investmentTier} (${(analysis.compositeScore * 100).toFixed(1)}%)`);
-        
-        // Emit analysis results for further processing
-        this.emit('tokenAnalyzed', analysis);
-        
-        // Log high-potential tokens
-        if (analysis.investmentTier === 'HIDDEN_GEM' || analysis.investmentTier === 'NEW_BURST') {
-          logger.info(`🚀 HIGH POTENTIAL TOKEN: ${token.symbol} - ${analysis.investmentTier} - Score: ${(analysis.compositeScore * 100).toFixed(1)}%`);
-          logger.info(`   Market Cap: $${analysis.marketMetrics?.marketCap?.toLocaleString()}, Volume: $${analysis.marketMetrics?.volume24h?.toLocaleString()}`);
-          logger.info(`   Risk Score: ${(analysis.overallRiskScore * 100).toFixed(1)}%, Confidence: ${(analysis.confidenceScore * 100).toFixed(1)}%`);
-          
-          // Emit high-potential alert
-          this.emit('highPotentialToken', analysis);
-        }
-        
-        // Log high-risk tokens
-        if (analysis.investmentTier === 'HIGH_RISK' || analysis.alertFlags.length > 0) {
-          logger.warn(`⚠️ HIGH RISK TOKEN: ${token.symbol} - Flags: ${analysis.alertFlags.join(', ')}`);
-        }
-        
-      } catch (error) {
-        logger.error(`Enhanced analysis failed for ${token.symbol}:`, error);
-      }
-    });
-
-    // Handle failed tokens
-    this.tokenProcessor.on('tokenFailed', (token, error) => {
-      logger.error(`Token processing failed: ${token.address}`, error);
-    });
-
-    // Handle market alerts
-    this.enhancedAnalyzer.on('marketAlert', (alert) => {
-      logger.info(`🚨 MARKET ALERT: ${alert.alertType} for ${alert.tokenAddress} - ${alert.message}`);
-      this.emit('marketAlert', alert);
-    });
-
-    // Handle enhanced analysis completion
-    this.enhancedAnalyzer.on('analysisComplete', (analysis) => {
-      // Store performance metrics
-      this.recordAnalysisPerformance(analysis);
-    });
-
-    // Handle market metrics updates
-    this.enhancedAnalyzer.on('marketMetricsUpdated', (metrics) => {
-      // Could emit to WebSocket clients for real-time updates
-      this.emit('marketMetricsUpdated', metrics);
-    });
-  }
-
-  private calculatePriority(token: any): number {
-    let priority = 50; // Base priority
-
-    // Platform priorities
-    if (token.platform === 'pumpfun') priority += 20;
-    if (token.platform === 'raydium') priority += 15;
-
-    // Age priority (newer = higher)
-    const ageMinutes = (Date.now() - new Date(token.createdAt).getTime()) / 60000;
-    if (ageMinutes < 5) priority += 30;
-    else if (ageMinutes < 15) priority += 20;
-    else if (ageMinutes < 60) priority += 10;
-
-    // Market cap priority (if available)
-    if (token.metadata?.marketCap) {
-      if (token.metadata.marketCap < 100000) priority += 15;
-      else if (token.metadata.marketCap < 500000) priority += 10;
-    }
-
-    // Enhanced priority for potential hidden gems
-    if (token.metadata?.marketCap >= 30000 && token.metadata?.marketCap <= 100000) {
-      priority += 25; // Boost for hidden gem range
-    }
-
-    return Math.min(100, Math.max(0, priority));
-  }
-
-  private async recordAnalysisPerformance(analysis: any): Promise<void> {
-    try {
-      // Record performance metrics every 10 analyses
-      if (Math.random() < 0.1) { // 10% sampling
-        const performanceData = {
-          analysis_type: 'enhanced_analysis',
-          tokens_processed: 1,
-          avg_processing_time_ms: analysis.processingTimeMs,
-          success_rate: 1.0,
-          api_calls_made: analysis.dataSourcesUsed.length,
-          cost_usd: this.estimateAnalysisCost(analysis),
-        };
-
-        await db('analysis_performance').insert(performanceData);
-      }
-    } catch (error) {
-      logger.error('Failed to record analysis performance:', error);
-    }
-  }
-
-  private estimateAnalysisCost(analysis: any): number {
-    // Rough cost estimation based on API calls
-    let cost = 0;
+    const pumpFunMonitor = new PumpFunMonitor();
+    const raydiumMonitor = new RaydiumMonitor();
     
-    if (analysis.dataSourcesUsed.includes('dexscreener')) cost += 0.001; // Free
-    if (analysis.dataSourcesUsed.includes('birdeye')) cost += 0.005;
-    if (analysis.dataSourcesUsed.includes('moralis')) cost += 0.003;
-    if (analysis.dataSourcesUsed.includes('helius')) cost += 0.002;
-    if (analysis.dataSourcesUsed.includes('solsniffer')) cost += 0.01;
+    this.discoveryManager.registerMonitor(pumpFunMonitor);
+    this.discoveryManager.registerMonitor(raydiumMonitor);
     
-    return cost;
+    logger.info('Discovery Service initialized with filtering enabled');
   }
 
   async start(): Promise<void> {
     if (this.isRunning) {
-      logger.warn('Discovery Service is already running');
+      logger.warn('Discovery Service already running');
       return;
     }
 
-    logger.info('Starting Discovery Service with Enhanced Analysis');
+    logger.info('Starting Discovery Service...');
     this.isRunning = true;
-
-    // Start all monitors
+    
     await this.discoveryManager.startAll();
-
-    // Start continuous analysis monitoring
-    this.startAnalysisMonitoring();
-
-    logger.info('Discovery Service with Enhanced Analysis started successfully');
+    // TokenProcessor doesn't have start method, it's ready to process immediately
+    
+    logger.info('Discovery Service started - only tracking tokens that meet filter criteria');
   }
 
   async stop(): Promise<void> {
-    if (!this.isRunning) {
-      logger.warn('Discovery Service is not running');
-      return;
-    }
-
-    logger.info('Stopping Discovery Service');
+    logger.info('Stopping Discovery Service...');
     this.isRunning = false;
-
-    // Stop all monitors
+    
     await this.discoveryManager.stopAll();
-
-    // Stop analyzers
-    await this.enhancedAnalyzer.stop();
-    await this.marketAnalyzer.stop();
-
-    // Clear processing queue
+    // For TokenProcessor, we can clear the queue
     await this.tokenProcessor.clear();
-
-    // Stop deduplication service
-    this.deduplicationService.stop();
-
+    
     logger.info('Discovery Service stopped');
   }
 
-  private startAnalysisMonitoring(): void {
-    // Monitor analysis performance every 5 minutes
-    setInterval(async () => {
-      if (!this.isRunning) return;
-      
-      try {
-        const stats = this.getStats();
-        
-        // Log performance summary
-        logger.info(`📊 Analysis Performance Summary:`);
-        logger.info(`   Tokens Monitored: ${stats.marketAnalysis.tokensMonitored}`);
-        logger.info(`   Discovery Queue: ${stats.processing.queueSize}`);
-        logger.info(`   Deduplication Rate: ${stats.deduplication.totalUnique} unique tokens`);
-        
-        // Check for performance issues
-        if (stats.processing.queueSize > 100) {
-          logger.warn(`High processing queue size: ${stats.processing.queueSize}`);
-        }
-        
-        if (stats.processing.queueSize === 0 && stats.discovery.totalDiscovered > 0) {
-          logger.info('✅ All discovered tokens processed');
-        }
-        
-      } catch (error) {
-        logger.error('Failed to monitor analysis performance:', error);
-      }
-    }, 300000); // 5 minutes
-
-    // Monitor high-potential tokens every minute
-    setInterval(async () => {
-      if (!this.isRunning) return;
-      
-      try {
-        const recentGems = await this.getRecentHighPotentialTokens();
-        
-        if (recentGems.length > 0) {
-          logger.info(`💎 Recent High-Potential Tokens (last hour): ${recentGems.length}`);
-          for (const gem of recentGems.slice(0, 3)) { // Show top 3
-            logger.info(`   ${gem.symbol}: ${gem.investment_classification} (${(gem.composite_score * 100).toFixed(1)}%)`);
-          }
-        }
-      } catch (error) {
-        logger.error('Failed to monitor high-potential tokens:', error);
-      }
-    }, 60000); // 1 minute
-  }
-
-  private async getRecentHighPotentialTokens(): Promise<any[]> {
-    try {
-      return await db('tokens')
-        .select('symbol', 'name', 'address', 'investment_classification', 'composite_score', 'discovered_at')
-        .whereIn('investment_classification', ['HIDDEN_GEM', 'NEW_BURST'])
-        .where('discovered_at', '>', db.raw("NOW() - INTERVAL '1 HOUR'"))
-        .orderBy('composite_score', 'desc')
-        .limit(10);
-    } catch (error) {
-      return [];
-    }
-  }
-
-  // Public methods for external access
-  getEnhancedAnalyzer(): EnhancedTokenAnalyzer {
-    return this.enhancedAnalyzer;
-  }
-
-  getMarketAnalyzer(): MarketMetricsAnalyzer {
-    return this.marketAnalyzer;
-  }
-
-  async analyzeSpecificToken(tokenAddress: string): Promise<any> {
-    try {
-      const token = await db('tokens')
-        .select('*')
-        .where('address', tokenAddress)
-        .first();
-
-      if (!token) {
-        throw new Error('Token not found');
-      }
-
-      const tokenDiscovery = {
-        address: token.address,
-        symbol: token.symbol,
-        name: token.name,
-        platform: token.platform,
-        createdAt: token.created_at || new Date(),
-        metadata: token.raw_data || {},
-      };
-
-      return await this.enhancedAnalyzer.analyzeToken(tokenDiscovery);
-    } catch (error) {
-      logger.error(`Failed to analyze specific token ${tokenAddress}:`, error);
-      throw error;
-    }
-  }
-
-  async getTokenAnalysis(tokenAddress: string): Promise<any> {
-    return await this.enhancedAnalyzer.getEnhancedAnalysis(tokenAddress);
-  }
-
-  async getRecentAlerts(limit: number = 10): Promise<any[]> {
-    return await this.marketAnalyzer.getRecentAlerts(limit);
+  async updateFilter(filterName: string): Promise<void> {
+    await this.discoveryManager.updateFilter(filterName);
   }
 
   getStats() {
     return {
       isRunning: this.isRunning,
       discovery: this.discoveryManager.getStats(),
-      processing: this.tokenProcessor.getStats(),
-      deduplication: this.deduplicationService.getStats(),
-      analysis: this.enhancedAnalyzer.getStats(),
-      marketAnalysis: this.marketAnalyzer.getStats(),
+      processing: this.tokenProcessor.getStats()
     };
+  }
+
+  // Add missing methods for compatibility with server.ts
+  async analyzeSpecificToken(address: string): Promise<any> {
+    logger.info(`Analyzing specific token: ${address}`);
+    
+    try {
+      // Get token from database
+      const token = await db('tokens')
+        .where('address', address)
+        .first();
+      
+      if (!token) {
+        throw new Error('Token not found');
+      }
+      
+      // Queue for analysis using addToken
+      await this.tokenProcessor.addToken({
+        address: token.address,
+        symbol: token.symbol,
+        name: token.name,
+        platform: token.platform,
+        createdAt: token.created_at,
+        metadata: {}
+      }, 90); // High priority
+      
+      return {
+        success: true,
+        message: 'Token queued for analysis',
+        token
+      };
+    } catch (error) {
+      logger.error(`Error analyzing token ${address}:`, error);
+      throw error;
+    }
+  }
+
+  async getTokenAnalysis(address: string): Promise<any> {
+    try {
+      const [token, metrics, signals] = await Promise.all([
+        db('tokens').where('address', address).first(),
+        db('enhanced_token_metrics').where('token_address', address).first(),
+        db('token_signals').where('token_address', address).orderBy('generated_at', 'desc').limit(5)
+      ]);
+      
+      if (!token) {
+        return null;
+      }
+      
+      return {
+        token,
+        metrics,
+        signals
+      };
+    } catch (error) {
+      logger.error(`Error getting token analysis:`, error);
+      throw error;
+    }
+  }
+
+  async getRecentAlerts(limit: number = 10): Promise<any[]> {
+    try {
+      // For now, return empty array or implement alert system
+      return [];
+    } catch (error) {
+      logger.error('Error getting recent alerts:', error);
+      return [];
+    }
+  }
+
+  // Placeholder methods for analyzers
+  getEnhancedAnalyzer(): any {
+    // Return placeholder or null
+    return null;
+  }
+
+  getMarketAnalyzer(): any {
+    // Return placeholder or null
+    return null;
   }
 }
 
-// Export singleton instance
 export const discoveryService = new DiscoveryService();
+
+// If this file is run directly, start the discovery service
+if (require.main === module) {
+  async function main() {
+    try {
+      logger.info('🚀 Starting Discovery Service...');
+      
+      await discoveryService.initialize();
+      await discoveryService.start();
+      
+      // Keep the process running
+      process.on('SIGINT', async () => {
+        logger.info('Received SIGINT, shutting down...');
+        await discoveryService.stop();
+        process.exit(0);
+      });
+      
+      process.on('SIGTERM', async () => {
+        logger.info('Received SIGTERM, shutting down...');
+        await discoveryService.stop();
+        process.exit(0);
+      });
+      
+      logger.info('✅ Discovery Service running! Press Ctrl+C to stop.');
+      
+    } catch (error) {
+      logger.error('❌ Failed to start Discovery Service:', error);
+      process.exit(1);
+    }
+  }
+  
+  main();
+}
