@@ -1,9 +1,14 @@
+// src/api/routes/token.routes.ts
 import { Router } from 'express';
-import { tokenController } from '../controllers/tokenController';
+import { TokenController } from '../controllers/token.controller';
 
 const router = Router();
+const tokenController = new TokenController();
 
-router.get('/live', tokenController.getLiveTokens);
-router.get('/:address', tokenController.getTokenDetails);
+// Get all tokens with filters
+router.get('/tokens', tokenController.getTokens);
 
-export default router;
+// Get token details by address
+router.get('/tokens/:address', tokenController.getTokenDetail);
+
+export const tokenRoutes = router;

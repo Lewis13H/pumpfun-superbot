@@ -1,17 +1,9 @@
-import { Router } from 'express';
-import tokenRoutes from './tokenRoutes';
-import settingsRoutes from './settingsRoutes';
+// src/api/routes/index.ts
+import { tokenRoutes } from './tokenRoutes';
+import { settingsRoutes } from './settings.routes';
 
-const router = Router();
-
-// Mount routes
-router.use('/tokens', tokenRoutes);
-router.use('/settings', settingsRoutes);
-
-// Add more routes as you create them
-// router.use('/monitoring', monitoringRoutes);
-// router.use('/signals', signalRoutes);
-// router.use('/wallets', walletRoutes);
-// router.use('/system', systemRoutes);
-
-export default router;
+// Export all routes
+export {
+  tokenRoutes,
+  settingsRoutes
+};

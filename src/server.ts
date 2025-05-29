@@ -1,4 +1,4 @@
-// src/server.ts - Updated for Module 2B1
+// src/server.ts - Updated for Dashboard Integration
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -9,12 +9,18 @@ import { logger, loggerStream } from './utils/logger';
 import { healthRouter } from './api/health';
 import { discoveryService } from './discovery/discovery-service';
 import marketMetricsRouter, { initializeAnalyzers } from './api/market-metrics';
+import monitorRouter from './api/monitor';
+import signalsRouter from './api/signals';
+import settingsRouter from './api/settings';
 
 const app = express();
 
 // Middleware
 app.use(helmet());
-app.use(cors());
+app.use(cors({
+  origin: ['http://localhost:3001', 'http://localhost:3000'],
+  credentials: true
+}));
 app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -313,31 +319,28 @@ tokensRouter.get('/', async (req, res) => {
     const totalResult = await totalQuery.first();
     const total = parseInt(totalResult?.count || '0');
 
-    res.json({
-      total,
-      limit: Number(limit),
-      offset: Number(offset),
-      filters: {
-        tier,
-        platform, 
-        min_score: Number(min_score),
-        max_risk: Number(max_risk),
-        timeframe,
-        sort: sortField,
-        order: sortOrder,
-      },
-      tokens: tokens.map((token: any) => ({
-        ...token,
-        composite_score: parseFloat(token.composite_score || '0'),
-        safety_score: parseFloat(token.safety_score || '0'),
-        potential_score: parseFloat(token.potential_score || '0'),
-        market_cap: parseFloat(token.market_cap || '0'),
-        liquidity: parseFloat(token.liquidity || '0'),
-        volume_24h: parseFloat(token.volume_24h || '0'),
-        price: parseFloat(token.price || '0'),
-      })),
-      timestamp: new Date().toISOString(),
-    });
+    // Transform tokens for dashboard
+    const transformedTokens = tokens.map((token: any) => ({
+      address: token.address,
+      symbol: token.symbol,
+      name: token.name,
+      platform: token.platform,
+      createdAt: token.created_at,
+      discoveredAt: token.discovered_at,
+      marketCap: parseFloat(token.market_cap || '0'),
+      price: parseFloat(token.price || '0'),
+      priceChange24h: parseFloat(token.price_change_24h || '0'),
+      volume24h: parseFloat(token.volume_24h || '0'),
+      liquidity: parseFloat(token.liquidity || '0'),
+      holders: token.holders || 0,
+      safetyScore: parseFloat(token.safety_score || '0'),
+      potentialScore: parseFloat(token.potential_score || '0'),
+      compositeScore: parseFloat(token.composite_score || '0'),
+      investmentClassification: token.investment_classification || 'STANDARD',
+      analysisStatus: token.analysis_status
+    }));
+
+    res.json(transformedTokens);
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -349,7 +352,7 @@ tokensRouter.get('/', async (req, res) => {
   }
 });
 
-// Get single token details
+// Get single token details - Enhanced for dashboard
 tokensRouter.get('/:address', async (req, res) => {
   try {
     const { address } = req.params;
@@ -367,24 +370,67 @@ tokensRouter.get('/:address', async (req, res) => {
       });
     }
 
-    // Get enhanced analysis if available
-    const analysis = await discoveryService.getTokenAnalysis(address);
-    
-    res.json({
-      token: {
-        ...token,
-        composite_score: parseFloat(token.composite_score || '0'),
-        safety_score: parseFloat(token.safety_score || '0'),
-        potential_score: parseFloat(token.potential_score || '0'),
-        market_cap: parseFloat(token.market_cap || '0'),
-        liquidity: parseFloat(token.liquidity || '0'),
-        volume_24h: parseFloat(token.volume_24h || '0'),
-        price: parseFloat(token.price || '0'),
-        raw_data: token.raw_data || {},
+    // Get security audit data if available
+    const securityAudit = await require('./database/postgres').db('token_security_audits')
+      .where('token_address', address)
+      .first();
+
+    // Get recent signals if any
+    const signals = await require('./database/postgres').db('token_signals')
+      .where('token_address', address)
+      .orderBy('generated_at', 'desc')
+      .limit(10);
+
+    // Format response for dashboard
+    const response = {
+      // Basic token info
+      address: token.address,
+      symbol: token.symbol,
+      name: token.name,
+      marketCap: parseFloat(token.market_cap || '0'),
+      price: parseFloat(token.price || '0'),
+      priceChange24h: parseFloat(token.price_change_24h || '0'),
+      volume24h: parseFloat(token.volume_24h || '0'),
+      liquidity: parseFloat(token.liquidity || '0'),
+      holders: token.holders || 0,
+      
+      // Security info
+      security: securityAudit ? {
+        rugPullRisk: parseFloat(securityAudit.rug_pull_risk || '0.5'),
+        honeypot: securityAudit.is_honeypot || false,
+        liquidityLocked: securityAudit.liquidity_locked || false,
+        mintDisabled: securityAudit.mint_authority_revoked || false,
+        topHolderPercent: parseFloat(securityAudit.top_holder_percent || '20'),
+        contractVerified: securityAudit.contract_verified || false
+      } : {
+        rugPullRisk: 0.5,
+        honeypot: false,
+        liquidityLocked: false,
+        mintDisabled: false,
+        topHolderPercent: 20,
+        contractVerified: false
       },
-      enhanced_analysis: analysis,
-      timestamp: new Date().toISOString(),
-    });
+      
+      // Signals
+      signals: signals.map((signal: any) => ({
+        type: signal.signal_type || 'HOLD',
+        confidence: parseFloat(signal.confidence || '0'),
+        reason: signal.reasons?.[0] || 'Analysis-based signal',
+        timestamp: signal.generated_at || new Date().toISOString()
+      })),
+      
+      // Mock data for now - replace with real data when available
+      priceHistory: generateMockPriceHistory(24),
+      holderDistribution: [
+        { range: '0-100', count: 450, percentage: 45 },
+        { range: '100-1K', count: 300, percentage: 30 },
+        { range: '1K-10K', count: 200, percentage: 20 },
+        { range: '10K+', count: 50, percentage: 5 }
+      ],
+      smartMoneyActivity: generateMockSmartMoneyActivity()
+    };
+    
+    res.json(response);
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -398,6 +444,15 @@ tokensRouter.get('/:address', async (req, res) => {
 });
 
 app.use('/api/tokens', tokensRouter);
+
+// Add API monitoring routes
+app.use('/api/monitor', monitorRouter);
+
+// Add signal routes
+app.use('/api/signals', signalsRouter);
+
+// Add settings routes
+app.use('/api/settings', settingsRouter);
 
 // Initialize analyzers with the discovery service
 app.use((req, res, next) => {
@@ -415,8 +470,8 @@ app.use((req, res, next) => {
 app.get('/api', (req, res) => {
   res.json({
     message: 'Solana Token Discovery & Analysis API',
-    version: '2.1.0',
-    module: 'Module 2B1: Core Market Metrics & Real-time Monitoring',
+    version: '2.2.0',
+    module: 'Dashboard Integration Complete',
     endpoints: {
       health: {
         'GET /health': 'Basic health check',
@@ -445,6 +500,20 @@ app.get('/api', (req, res) => {
         'GET /api/market/stats': 'Market analyzer statistics',
         'POST /api/market/token/:address/analyze': 'Force token analysis',
       },
+      monitor: {
+        'GET /api/monitor/status': 'API service status',
+        'GET /api/monitor/cost-history': 'API cost history',
+        'GET /api/monitor/errors': 'Recent error logs',
+      },
+      signals: {
+        'GET /api/signals/history': 'Trading signal history',
+        'GET /api/signals/stats': 'Signal performance stats',
+        'GET /api/signals/profit-history': 'Profit/loss history',
+      },
+      settings: {
+        'GET /api/settings': 'Get current settings',
+        'PUT /api/settings': 'Update settings',
+      },
     },
     features: [
       'Real-time token discovery from PumpFun and Raydium',
@@ -454,7 +523,11 @@ app.get('/api', (req, res) => {
       'Trading pattern recognition',
       'Price and volume alert system',
       'Historical data tracking',
-      'Comprehensive API endpoints',
+      'WebSocket support for real-time updates',
+      'Dashboard integration',
+      'API monitoring and cost tracking',
+      'Signal history and performance tracking',
+      'Configurable settings management',
     ],
     timestamp: new Date().toISOString(),
   });
@@ -479,5 +552,41 @@ app.use('*', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// Helper functions
+function generateMockPriceHistory(hours: number) {
+  const history = [];
+  const basePrice = 0.0001;
+  
+  for (let i = hours - 1; i >= 0; i--) {
+    const time = new Date(Date.now() - i * 60 * 60 * 1000);
+    const variance = (Math.random() - 0.5) * 0.2;
+    history.push({
+      time: time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      price: basePrice * (1 + variance)
+    });
+  }
+  
+  return history;
+}
+
+function generateMockSmartMoneyActivity() {
+  const activities = [];
+  const wallets = ['DV2e...MKtq', 'So11...1112', 'EPjF...AUWE', 'Gq3H...DmPK'];
+  const actions = ['BUY', 'SELL'];
+  
+  for (let i = 0; i < 5; i++) {
+    const action = actions[Math.floor(Math.random() * actions.length)];
+    activities.push({
+      wallet: wallets[Math.floor(Math.random() * wallets.length)],
+      action: action as 'BUY' | 'SELL',
+      amount: Math.floor(1000 + Math.random() * 10000),
+      timestamp: new Date(Date.now() - i * 60 * 60 * 1000).toISOString(),
+      profit: action === 'SELL' ? (Math.random() * 100 - 20) : undefined
+    });
+  }
+  
+  return activities;
+}
 
 export { app };
