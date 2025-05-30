@@ -5,6 +5,7 @@ import { marketRoutes } from './market.routes';
 import { monitorRoutes } from './monitor.routes';
 import { settingsRoutes } from './settings.routes';
 import { signalRoutes } from './signal.routes';
+import dbStatsRoutes from './db-stats';
 
 const router = Router();
 
@@ -23,6 +24,7 @@ router.use('/market', marketRoutes);
 router.use('/monitor', monitorRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/signals', signalRoutes);
+router.use('/', dbStatsRoutes);
 
 // Default export for the combined router
 export default router;

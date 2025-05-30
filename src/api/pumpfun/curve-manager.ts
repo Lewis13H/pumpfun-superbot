@@ -1,6 +1,8 @@
 // src/api/pumpfun/curve-manager.ts
-import { Connection, PublicKey } from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
 import { logger } from '../../utils/logger';
+import { getRateLimitedConnection } from '../../utils/rpc-rate-limiter';
+import type { RateLimitedConnection } from '../../utils/rpc-rate-limiter';
 
 // Constants from pump.fun
 const LAMPORTS_PER_SOL = 1_000_000_000;
@@ -28,223 +30,104 @@ export interface BondingCurveState {
 
 export class BondingCurveManager {
   private solPriceUSD: number = 180; // Default SOL price, should be updated
-  private readonly RAYDIUM_MIGRATION_THRESHOLD = 69420 * LAMPORTS_PER_SOL; // 69,420 SOL
+  private connection: RateLimitedConnection;
 
-  constructor(private connection: Connection) {
-    // Start periodic SOL price updates
-    this.updateSolPrice();
-    setInterval(() => this.updateSolPrice(), 60000); // Update every minute
+  constructor() {
+    this.connection = getRateLimitedConnection();
+    logger.info('BondingCurveManager initialized with rate-limited connection');
   }
 
-  /**
-   * Get bonding curve state and calculate price
-   */
-  async getCurveState(bondingCurveAddress: string): Promise<BondingCurveState> {
+  async getCurveState(bondingCurveAddress: string): Promise<BondingCurveState | null> {
     try {
       const bondingCurve = new PublicKey(bondingCurveAddress);
       const accountInfo = await this.connection.getAccountInfo(bondingCurve);
 
       if (!accountInfo || !accountInfo.data) {
-        // Account might not exist yet for very new tokens
-        // Return default values instead of throwing
-        logger.debug(`Bonding curve account not found yet: ${bondingCurveAddress}`);
-        
-        return {
-          virtualTokenReserves: BigInt(1_000_000_000 * 1_000_000), // 1B tokens (typical initial supply)
-          virtualSolReserves: BigInt(30 * 1_000_000_000), // 30 SOL (typical initial)
-          realTokenReserves: BigInt(0),
-          realSolReserves: BigInt(0),
-          tokenTotalSupply: BigInt(1_000_000_000 * 1_000_000),
-          complete: false,
-          price: 0.00003, // Typical initial price
-          marketCapSol: 30,
-          solReserves: 0,
-          tokenReserves: 0,
-          totalSupply: 1_000_000_000,
-          progress: 0,
-          solPriceUSD: this.solPriceUSD,
-        };
+        logger.error(`No account data found for bonding curve: ${bondingCurveAddress}`);
+        return null;
       }
 
-      // Parse bonding curve data
-      const curveData = this.parseBondingCurveData(accountInfo.data);
+      // Parse the bonding curve data
+      const data = accountInfo.data;
       
+      // Pump.fun bonding curve layout (adjust based on actual structure)
+      const virtualTokenReserves = data.readBigUInt64LE(8);
+      const virtualSolReserves = data.readBigUInt64LE(16);
+      const realTokenReserves = data.readBigUInt64LE(24);
+      const realSolReserves = data.readBigUInt64LE(32);
+      const tokenTotalSupply = data.readBigUInt64LE(40);
+      const complete = data.readUInt8(48) === 1;
+
       // Calculate derived values
-      const price = this.calculatePrice(curveData);
-      const progress = this.calculateProgress(curveData);
-      
+      const price = this.calculatePrice(virtualSolReserves, virtualTokenReserves);
+      const marketCapSol = this.calculateMarketCap(tokenTotalSupply, price);
+      const progress = this.calculateProgress(realSolReserves);
+
       return {
-        ...curveData,
+        virtualTokenReserves,
+        virtualSolReserves,
+        realTokenReserves,
+        realSolReserves,
+        tokenTotalSupply,
+        complete,
         price,
-        marketCapSol: price * (Number(curveData.tokenTotalSupply) / CURVE_TOKEN_DECIMALS),
-        solReserves: Number(curveData.realSolReserves) / LAMPORTS_PER_SOL,
-        tokenReserves: Number(curveData.realTokenReserves) / CURVE_TOKEN_DECIMALS,
-        totalSupply: Number(curveData.tokenTotalSupply) / CURVE_TOKEN_DECIMALS,
+        marketCapSol,
+        solReserves: Number(realSolReserves) / LAMPORTS_PER_SOL,
+        tokenReserves: Number(realTokenReserves) / CURVE_TOKEN_DECIMALS,
+        totalSupply: Number(tokenTotalSupply) / CURVE_TOKEN_DECIMALS,
         progress,
-        solPriceUSD: this.solPriceUSD,
+        solPriceUSD: this.solPriceUSD
       };
     } catch (error) {
       logger.error('Error fetching bonding curve state:', error);
-      
-      // Return default values for error cases
-      return {
-        virtualTokenReserves: BigInt(1_000_000_000 * 1_000_000),
-        virtualSolReserves: BigInt(30 * 1_000_000_000),
-        realTokenReserves: BigInt(0),
-        realSolReserves: BigInt(0),
-        tokenTotalSupply: BigInt(1_000_000_000 * 1_000_000),
-        complete: false,
-        price: 0.00003,
-        marketCapSol: 30,
-        solReserves: 0,
-        tokenReserves: 0,
-        totalSupply: 1_000_000_000,
-        progress: 0,
-        solPriceUSD: this.solPriceUSD,
-      };
+      return null;
     }
   }
 
-  /**
-   * Parse bonding curve account data
-   * Based on pump.fun's bonding curve structure
-   */
-  private parseBondingCurveData(data: Buffer): Omit<BondingCurveState, 'price' | 'marketCapSol' | 'solReserves' | 'tokenReserves' | 'totalSupply' | 'progress' | 'solPriceUSD'> {
-    // Skip discriminator (8 bytes)
-    let offset = 8;
-
-    // Read virtual token reserves (u64)
-    const virtualTokenReserves = data.readBigUInt64LE(offset);
-    offset += 8;
-
-    // Read virtual SOL reserves (u64)
-    const virtualSolReserves = data.readBigUInt64LE(offset);
-    offset += 8;
-
-    // Read real token reserves (u64)
-    const realTokenReserves = data.readBigUInt64LE(offset);
-    offset += 8;
-
-    // Read real SOL reserves (u64)
-    const realSolReserves = data.readBigUInt64LE(offset);
-    offset += 8;
-
-    // Read token total supply (u64)
-    const tokenTotalSupply = data.readBigUInt64LE(offset);
-    offset += 8;
-
-    // Read complete flag (bool)
-    const complete = data[offset] === 1;
-
-    return {
-      virtualTokenReserves,
-      virtualSolReserves,
-      realTokenReserves,
-      realSolReserves,
-      tokenTotalSupply,
-      complete,
-    };
-  }
-
-  /**
-   * Calculate token price from bonding curve reserves
-   * Using constant product formula: k = x * y
-   */
-  private calculatePrice(curveData: Omit<BondingCurveState, 'price' | 'marketCapSol' | 'solReserves' | 'tokenReserves' | 'totalSupply' | 'progress' | 'solPriceUSD'>): number {
-    if (curveData.virtualTokenReserves === 0n) {
-      return 0;
-    }
-
-    // Price = virtual SOL reserves / virtual token reserves
-    const price = Number(curveData.virtualSolReserves) / Number(curveData.virtualTokenReserves);
+  private calculatePrice(virtualSolReserves: bigint, virtualTokenReserves: bigint): number {
+      if (virtualTokenReserves === 0n) return 0;
     
-    // Convert to SOL per token (accounting for decimals)
-    return price * CURVE_TOKEN_DECIMALS / LAMPORTS_PER_SOL;
+      // Convert reserves to decimal values
+      const solReserves = Number(virtualSolReserves) / LAMPORTS_PER_SOL;
+      const tokenReserves = Number(virtualTokenReserves) / CURVE_TOKEN_DECIMALS;
+    
+      if (tokenReserves === 0) return 0;
+    
+      // Price = SOL reserves / token reserves
+      return solReserves / tokenReserves;
   }
 
-  /**
-   * Calculate progress towards Raydium migration
-   */
-  private calculateProgress(curveData: Omit<BondingCurveState, 'price' | 'marketCapSol' | 'solReserves' | 'tokenReserves' | 'totalSupply' | 'progress' | 'solPriceUSD'>): number {
-    const currentSol = Number(curveData.realSolReserves);
-    const progress = (currentSol / this.RAYDIUM_MIGRATION_THRESHOLD) * 100;
+  private calculateMarketCap(totalSupply: bigint, priceInSol: number): number {
+      // Convert total supply to decimal tokens
+      const totalSupplyDecimal = Number(totalSupply) / CURVE_TOKEN_DECIMALS;
+    
+      // Market cap in SOL = total supply * price per token
+      return totalSupplyDecimal * priceInSol;
+  }
+
+  private calculateProgress(realSolReserves: bigint): number {
+    // Pump.fun typically migrates at 85 SOL
+    const MIGRATION_THRESHOLD = 85 * LAMPORTS_PER_SOL;
+    const progress = (Number(realSolReserves) / MIGRATION_THRESHOLD) * 100;
     return Math.min(progress, 100);
   }
 
-  /**
-   * Calculate token amount for a given SOL amount
-   */
-  calculateTokenAmount(solAmount: number, curveState: BondingCurveState): number {
-    const solLamports = BigInt(Math.floor(solAmount * LAMPORTS_PER_SOL));
-    
-    // Calculate using constant product formula
-    const k = curveState.virtualTokenReserves * curveState.virtualSolReserves;
-    const newSolReserves = curveState.virtualSolReserves + solLamports;
-    const newTokenReserves = k / newSolReserves;
-    const tokenAmount = curveState.virtualTokenReserves - newTokenReserves;
-    
-    return Number(tokenAmount) / CURVE_TOKEN_DECIMALS;
+  async updateSolPrice(price: number): Promise<void> {
+    this.solPriceUSD = price;
+    logger.debug(`Updated SOL price to $${price}`);
   }
 
-  /**
-   * Calculate SOL amount for selling tokens
-   */
-  calculateSolAmount(tokenAmount: number, curveState: BondingCurveState): number {
-    const tokenLamports = BigInt(Math.floor(tokenAmount * CURVE_TOKEN_DECIMALS));
-    
-    // Calculate using constant product formula
-    const k = curveState.virtualTokenReserves * curveState.virtualSolReserves;
-    const newTokenReserves = curveState.virtualTokenReserves + tokenLamports;
-    const newSolReserves = k / newTokenReserves;
-    const solAmount = curveState.virtualSolReserves - newSolReserves;
-    
-    return Number(solAmount) / LAMPORTS_PER_SOL;
-  }
-
-  /**
-   * Update SOL price from external source
-   */
-  private async updateSolPrice(): Promise<void> {
-    try {
-      // You can integrate with your price feed here
-      // For now, using a placeholder
-      // const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-      // this.solPriceUSD = response.data.solana.usd;
-      
-      this.solPriceUSD = 180; // Placeholder - update this with real price feed
-    } catch (error) {
-      logger.error('Error updating SOL price:', error);
-    }
-  }
-
-  /**
-   * Check if a token is close to Raydium migration
-   */
-  isNearMigration(curveState: BondingCurveState, threshold: number = 90): boolean {
-    return curveState.progress >= threshold;
-  }
-
-  /**
-   * Get formatted price info for display
-   */
-  getFormattedPriceInfo(curveState: BondingCurveState): {
-    priceSOL: string;
-    priceUSD: string;
-    marketCapSOL: string;
-    marketCapUSD: string;
-    liquidity: string;
-    progress: string;
-  } {
-    const priceUSD = curveState.price * this.solPriceUSD;
-    const marketCapUSD = curveState.marketCapSol * this.solPriceUSD;
-    
+  getGraduationThreshold(): { sol: number; usd: number } {
+    const solThreshold = 85; // 85 SOL for Raydium migration
     return {
-      priceSOL: `${curveState.price.toFixed(8)} SOL`,
-      priceUSD: `$${priceUSD.toFixed(6)}`,
-      marketCapSOL: `${curveState.marketCapSol.toFixed(2)} SOL`,
-      marketCapUSD: `$${marketCapUSD.toFixed(2)}`,
-      liquidity: `${curveState.solReserves.toFixed(2)} SOL`,
-      progress: `${curveState.progress.toFixed(1)}%`,
+      sol: solThreshold,
+      usd: solThreshold * this.solPriceUSD
     };
+  }
+
+  estimateTokensForSol(bondingCurveAddress: string, solAmount: number): number {
+    // Simplified calculation - should use actual bonding curve math
+    // This is a placeholder - implement actual pump.fun curve calculations
+    return solAmount * 1000000; // Placeholder
   }
 }

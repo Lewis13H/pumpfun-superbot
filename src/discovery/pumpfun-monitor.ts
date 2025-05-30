@@ -1,6 +1,7 @@
 // src/discovery/pumpfun-monitor.ts
 import WebSocket from 'ws';
 import { Connection, PublicKey } from '@solana/web3.js';
+import { getRateLimitedConnection } from '../utils/rpc-rate-limiter';
 import { BaseMonitor, TokenDiscovery } from './base-monitor';
 import { config } from '../config';
 import { logger } from '../utils/logger';
@@ -60,8 +61,8 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
 
   constructor() {
     super('EnhancedPumpFun');
-    this.connection = new Connection(config.apis.heliusRpcUrl);
-    this.curveManager = new BondingCurveManager(this.connection);
+    this.connection = getRateLimitedConnection() as Connection;
+    this.curveManager = new BondingCurveManager();
     this.eventProcessor = new PumpEventProcessor(this.PUMP_FUN_PROGRAM);
   }
 
@@ -126,6 +127,11 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
         if (!bondingCurve) continue;
 
         const curveState = await this.curveManager.getCurveState(bondingCurve);
+
+        if (!curveState) {
+          logger.warn(`Failed to get curve state for bonding curve: ${bondingCurve}`);
+          return;
+        }
         
         // Calculate graduation metrics
         const candidate: GraduationCandidate = {
