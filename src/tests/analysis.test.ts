@@ -1,13 +1,13 @@
-import { SimpleTokenAnalyzer } from '../analysis/simple-analyzer';
+import { TieredTokenAnalyzer } from '../analysis/tiered-analyzer';
 import { TokenAnalysisStorage } from '../analysis/analysis-storage';
 import { MetricsFetcher } from '../analysis/metrics-fetcher';
 
 describe('Analysis System', () => {
-  describe('SimpleTokenAnalyzer', () => {
-    let analyzer: SimpleTokenAnalyzer;
+  describe('TieredTokenAnalyzer', () => {
+    let analyzer: TieredTokenAnalyzer;
 
     beforeEach(() => {
-      analyzer = new SimpleTokenAnalyzer();
+      analyzer = new TieredTokenAnalyzer();
     });
 
     test('should calculate scores correctly', async () => {
@@ -40,7 +40,7 @@ describe('Analysis System', () => {
 
   describe('Score Calculations', () => {
     test('should normalize scores between 0 and 1', () => {
-      const analyzer = new SimpleTokenAnalyzer();
+      const analyzer = new TieredTokenAnalyzer();
       
       // Test normalizeScore method
       expect((analyzer as any).normalizeScore(0, 0, 100)).toBe(0);

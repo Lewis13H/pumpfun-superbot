@@ -1,5 +1,5 @@
 import { PumpFunMonitor } from '../discovery/pumpfun-monitor';
-import { DiscoveryManager } from '../discovery/discovery-manager';
+import { FilteredFilteredDiscoveryManager } from '../discovery/filtered-discovery-manager';
 import { db } from '../database/postgres';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
@@ -17,12 +17,12 @@ const samplePumpFunData = {
 
 describe('PumpFun Integration Test', () => {
   let monitor: PumpFunMonitor;
-  let discoveryManager: DiscoveryManager;
+  let FilteredDiscoveryManager: FilteredDiscoveryManager;
   
   beforeAll(async () => {
     // Initialize discovery manager
-    discoveryManager = new DiscoveryManager();
-    await discoveryManager.initialize();
+    FilteredDiscoveryManager = new FilteredDiscoveryManager();
+    await FilteredDiscoveryManager.initialize();
     
     // Initialize pump.fun monitor
     monitor = new PumpFunMonitor();
@@ -30,7 +30,7 @@ describe('PumpFun Integration Test', () => {
 
   afterAll(async () => {
     await monitor.stop();
-    await discoveryManager.stopAll();
+    await FilteredDiscoveryManager.stopAll();
   });
 
   test('should correctly map pump.fun data to TokenDiscovery format', () => {

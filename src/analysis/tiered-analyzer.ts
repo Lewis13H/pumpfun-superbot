@@ -1,17 +1,10 @@
 // src/analysis/tiered-analyzer.ts
 import { TokenDiscovery } from '../discovery/base-monitor';
-import { 
-  SolSnifferClient, 
-  BirdeyeClient, 
-  DexScreenerClient, 
-  MoralisClient, 
-  HeliusClient,
-  SolSnifferTokenAnalysis,
-  BirdeyeTokenData,
-  DexScreenerPair,
-  MoralisHolderData,
-  HeliusEnhancedData
-} from '../api';
+import { SolSnifferClient, SolSnifferTokenAnalysis } from '../api/solsniffer-client';
+import { BirdeyeClient, BirdeyeTokenData } from '../api/birdeye-client';
+import { DexScreenerClient, DexScreenerPair } from '../api/dexscreener-client';
+import { MoralisClient, MoralisHolderData } from '../api/moralis-client';
+import { HeliusClient, HeliusEnhancedData } from '../api/helius-client';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 
