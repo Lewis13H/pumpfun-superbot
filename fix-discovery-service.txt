@@ -1,5 +1,0 @@
-// Find this line in discovery-service.ts (around line 26):
-this.discoveryManager.on('tokenDiscovered', async (tokenData) => {
-
-// Replace with:
-this.discoveryManager.on('tokenDiscovered', async (tokenData: any) => {

@@ -8,6 +8,9 @@ import { logger } from '../utils/logger';
 import { BondingCurveManager } from '../api/pumpfun/curve-manager';
 import { PumpEventProcessor } from '../api/pumpfun/event-processor';
 import { db } from '../database/postgres';
+import { bondingCurveCalculator } from '../utils/pumpfun-bonding-curve';
+import { solPriceService } from '../services/sol-price-service';
+import { PUMP_FUN_CONSTANTS } from '../constants/pumpfun-constants';
 
 // Enhanced token discovery interface with pump.fun specific data
 export interface EnhancedTokenDiscovery extends TokenDiscovery {
@@ -49,15 +52,13 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
   
   // Graduation tracking
   private graduationCheckInterval: NodeJS.Timeout | null = null;
-  private trackedTokens: Map<string, GraduationCandidate> = new Map();
+  private trackedTokens: Map<string, GraduationCandidate & { tokensSold?: number }> = new Map();
   private readonly GRADUATION_CHECK_INTERVAL = 30000; // 30 seconds
-  private readonly GRADUATION_MARKET_CAP_USD = 69420; // $69,420 USD market cap target
-  private readonly GRADUATION_SOL_THRESHOLD = 385; // Approximate SOL in bonding curve at graduation (at $180/SOL)
   
-  // PumpFun constants
-  private readonly PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
-  private readonly PUMP_FUN_FEE = new PublicKey('CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM');
-  private readonly PUMP_FUN_EVENT_AUTHORITY = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+  // PumpFun constants from the constants file
+  private readonly PUMP_FUN_PROGRAM = new PublicKey(PUMP_FUN_CONSTANTS.PUMP_FUN_PROGRAM);
+  private readonly PUMP_FUN_FEE = new PublicKey(PUMP_FUN_CONSTANTS.PUMP_FUN_FEE);
+  private readonly PUMP_FUN_EVENT_AUTHORITY = new PublicKey(PUMP_FUN_CONSTANTS.PUMP_FUN_EVENT_AUTHORITY);
 
   constructor() {
     super('EnhancedPumpFun');
@@ -68,6 +69,15 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
 
   protected async startMonitoring(): Promise<void> {
     logger.info('Starting enhanced PumpFun monitoring with graduation tracking');
+    
+    // Start SOL price service if not already running
+    if (solPriceService.getCurrentPrice() === 180) { // Default price
+      await solPriceService.start();
+      // Wait a moment for price to update
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    
+    logger.info(`Current SOL price: $${solPriceService.getCurrentPrice()}`);
     
     // Load existing tokens to track
     await this.loadExistingTokensForTracking();
@@ -118,6 +128,7 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
    */
   private async checkGraduationCandidates(): Promise<void> {
     const candidates: GraduationCandidate[] = [];
+    const currentSolPrice = solPriceService.getCurrentPrice();
 
     for (const [tokenAddress, previousData] of this.trackedTokens) {
       try {
@@ -126,63 +137,69 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
           
         if (!bondingCurve) continue;
 
-        const curveState = await this.curveManager.getCurveState(bondingCurve);
-
-        if (!curveState) {
-          logger.warn(`Failed to get curve state for bonding curve: ${bondingCurve}`);
-          return;
+        // Get tokens sold from the bonding curve contract
+        const tokensSold = await this.getTokensSoldFromCurve(bondingCurve);
+        
+        if (tokensSold === null) {
+          logger.warn(`Failed to get tokens sold for bonding curve: ${bondingCurve}`);
+          continue;
         }
         
-        // Calculate graduation metrics
+        // Use the bonding curve calculator for accurate calculations
+        const curveState = bondingCurveCalculator.getState(tokensSold);
+        
+        // Create graduation candidate with correct data
         const candidate: GraduationCandidate = {
           tokenAddress,
           symbol: previousData.symbol,
           name: previousData.name,
           bondingCurve: bondingCurve,
-          curveProgress: curveState.progress,
-          currentSolReserves: curveState.solReserves,
-          targetSolReserves: this.GRADUATION_SOL_THRESHOLD,
-          distanceToGraduation: this.GRADUATION_MARKET_CAP_USD - (curveState.marketCapSol * curveState.solPriceUSD),
-          currentPrice: curveState.price,
-          marketCapUSD: curveState.marketCapSol * curveState.solPriceUSD,
-          targetMarketCapUSD: this.GRADUATION_MARKET_CAP_USD,
+          curveProgress: curveState.progressPercent / 100, // Convert to 0-1 scale
+          currentSolReserves: curveState.solRaised,
+          targetSolReserves: PUMP_FUN_CONSTANTS.EXPECTED_SOL_AT_GRADUATION,
+          distanceToGraduation: curveState.distanceToGraduation.usd,
+          currentPrice: curveState.priceSOL,
+          marketCapUSD: curveState.marketCapUSD,
+          targetMarketCapUSD: PUMP_FUN_CONSTANTS.GRADUATION_MARKET_CAP_USD,
         };
 
-        // Estimate time to graduation based on recent market cap growth
-        if (previousData.marketCapUSD) {
-          const marketCapGrowthRate = (candidate.marketCapUSD - previousData.marketCapUSD) / 
-            (this.GRADUATION_CHECK_INTERVAL / 1000 / 60); // USD per minute
+        // Estimate time to graduation based on recent token sale velocity
+        if (previousData.tokensSold !== undefined) {
+          const tokensSoldDelta = tokensSold - previousData.tokensSold;
+          const timeDelta = this.GRADUATION_CHECK_INTERVAL / 1000 / 60; // minutes
           
-          if (marketCapGrowthRate > 0) {
-            candidate.estimatedTimeToGraduation = 
-              candidate.distanceToGraduation / marketCapGrowthRate; // minutes
+          if (tokensSoldDelta > 0) {
+            const tokensPerMinute = tokensSoldDelta / timeDelta;
+            candidate.estimatedTimeToGraduation = bondingCurveCalculator.estimateTimeToGraduation(
+              curveState.marketCapUSD,
+              tokensPerMinute * curveState.priceUSD // Convert to market cap growth rate
+            ) || undefined;
           }
         }
 
-        // Calculate price at graduation (rough estimate based on current trajectory)
-        const percentToGraduation = (candidate.marketCapUSD / this.GRADUATION_MARKET_CAP_USD) * 100;
-        const priceMultiplier = this.GRADUATION_MARKET_CAP_USD / candidate.marketCapUSD;
-        candidate.priceAtGraduation = curveState.price * Math.sqrt(priceMultiplier); // Square root for bonding curve math
+        // Calculate price at graduation
+        candidate.priceAtGraduation = PUMP_FUN_CONSTANTS.FINAL_PRICE_USD / solPriceService.getCurrentPrice();
 
-        // Update tracked data
-        this.trackedTokens.set(tokenAddress, candidate);
+        // Update tracked data with tokens sold
+        this.trackedTokens.set(tokenAddress, {
+          ...candidate,
+          tokensSold // Store for next iteration
+        });
 
-        // Check if nearing graduation based on market cap
-        const graduationPercentage = (candidate.marketCapUSD / this.GRADUATION_MARKET_CAP_USD) * 100;
-        
-        if (graduationPercentage >= 70) {
+        // Check if nearing graduation based on progress
+        if (curveState.progressPercent >= 70) {
           candidates.push(candidate);
           
           // Emit graduation alert at different thresholds
-          if (graduationPercentage >= 90) {
+          if (curveState.progressPercent >= 90) {
             this.emitGraduationAlert(candidate, 'IMMINENT');
-          } else if (graduationPercentage >= 80) {
+          } else if (curveState.progressPercent >= 80) {
             this.emitGraduationAlert(candidate, 'APPROACHING');
           }
         }
 
         // Update database
-        await this.updateTokenGraduationData(tokenAddress, candidate);
+        await this.updateTokenGraduationData(tokenAddress, candidate, tokensSold);
 
       } catch (error) {
         logger.error(`Error checking graduation for ${tokenAddress}:`, error);
@@ -197,6 +214,39 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
   }
 
   /**
+   * Get tokens sold from bonding curve
+   * Fixed to use market cap progress for exponential curve
+   */
+  private async getTokensSoldFromCurve(bondingCurveAddress: string): Promise<number | null> {
+    try {
+      const token = await db('tokens')
+        .where('bonding_curve', bondingCurveAddress)
+        .first();
+      
+      if (token && token.market_cap) {
+        // For exponential curve, calculate progress from market cap
+        const marketCapUSD = token.market_cap;
+        
+        // Calculate progress (0 to 1) based on market cap range
+        const progress = Math.max(0, Math.min(1, 
+          (marketCapUSD - PUMP_FUN_CONSTANTS.INITIAL_MARKET_CAP_USD) / 
+          (PUMP_FUN_CONSTANTS.GRADUATION_MARKET_CAP_USD - PUMP_FUN_CONSTANTS.INITIAL_MARKET_CAP_USD)
+        ));
+        
+        // Convert progress to tokens sold
+        const tokensSold = progress * PUMP_FUN_CONSTANTS.BONDING_CURVE_SUPPLY;
+        
+        return tokensSold;
+      }
+      
+      return 0; // Default to 0 if no data
+    } catch (error) {
+      logger.error('Error getting tokens sold from curve:', error);
+      return null;
+    }
+  }
+
+  /**
    * Add token to graduation tracking
    */
   private async addTokenToGraduationTracking(token: any): Promise<void> {
@@ -207,74 +257,36 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
         return;
       }
 
-      // Try to get curve state with retry logic
-      let curveState;
-      let retries = 3;
-      
-      while (retries > 0) {
-        try {
-          curveState = await this.curveManager.getCurveState(bondingCurve);
-          break; // Success, exit loop
-        } catch (error) {
-          retries--;
-          if (retries === 0) {
-            logger.debug(`Could not fetch curve state for ${token.symbol} after retries:`, error);
-            
-            // Use data from WebSocket if available
-            if (token.marketCapSol) {
-              const marketCapUSD = token.marketCapSol * 180; // Approximate
-              if (marketCapUSD > 5000) {
-                // Add with basic data
-                const candidate: GraduationCandidate = {
-                  tokenAddress: token.address || token.mint,
-                  symbol: token.symbol,
-                  name: token.name,
-                  bondingCurve: bondingCurve,
-                  curveProgress: 0, // Unknown
-                  currentSolReserves: 0, // Unknown
-                  targetSolReserves: this.GRADUATION_SOL_THRESHOLD,
-                  distanceToGraduation: this.GRADUATION_MARKET_CAP_USD - marketCapUSD,
-                  currentPrice: 0, // Unknown
-                  marketCapUSD: marketCapUSD,
-                  targetMarketCapUSD: this.GRADUATION_MARKET_CAP_USD,
-                };
-                
-                this.trackedTokens.set(token.address || token.mint, candidate);
-                logger.info(`Added ${token.symbol} to graduation tracking (from WebSocket data) - $${marketCapUSD.toFixed(0)} market cap`);
-              }
-            }
-            return;
-          }
-          
-          // Wait before retry
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
-      
-      if (!curveState) return;
-      
-      const marketCapUSD = curveState.marketCapSol * curveState.solPriceUSD;
+      // Get tokens sold for this token
+      const tokensSold = await this.getTokensSoldFromCurve(bondingCurve);
+      if (tokensSold === null) return;
+
+      // Get curve state using the bonding curve calculator
+      const curveState = bondingCurveCalculator.getState(tokensSold);
       
       // Track tokens that have at least $5,000 market cap (about 7% of graduation)
-      if (marketCapUSD > 5000) {
+      if (curveState.marketCapUSD > 5000) {
         const candidate: GraduationCandidate = {
           tokenAddress: token.address || token.mint,
           symbol: token.symbol,
           name: token.name,
           bondingCurve: bondingCurve,
-          curveProgress: curveState.progress,
-          currentSolReserves: curveState.solReserves,
-          targetSolReserves: this.GRADUATION_SOL_THRESHOLD,
-          distanceToGraduation: this.GRADUATION_MARKET_CAP_USD - marketCapUSD,
-          currentPrice: curveState.price,
-          marketCapUSD: marketCapUSD,
-          targetMarketCapUSD: this.GRADUATION_MARKET_CAP_USD,
+          curveProgress: curveState.progressPercent / 100, // Convert to 0-1 scale
+          currentSolReserves: curveState.solRaised,
+          targetSolReserves: PUMP_FUN_CONSTANTS.EXPECTED_SOL_AT_GRADUATION,
+          distanceToGraduation: curveState.distanceToGraduation.usd,
+          currentPrice: curveState.priceSOL,
+          marketCapUSD: curveState.marketCapUSD,
+          targetMarketCapUSD: PUMP_FUN_CONSTANTS.GRADUATION_MARKET_CAP_USD,
         };
         
-        this.trackedTokens.set(token.address || token.mint, candidate);
+        this.trackedTokens.set(token.address || token.mint, {
+          ...candidate,
+          tokensSold
+        });
 
-        const percentageToGraduation = (marketCapUSD / this.GRADUATION_MARKET_CAP_USD) * 100;
-        logger.info(`Added ${token.symbol} to graduation tracking - $${marketCapUSD.toFixed(0)} market cap (${percentageToGraduation.toFixed(1)}% of graduation)`);
+        const percentageToGraduation = curveState.progressPercent;
+        logger.info(`Added ${token.symbol} to graduation tracking - $${curveState.marketCapUSD.toFixed(0)} market cap (${percentageToGraduation.toFixed(1)}% of graduation)`);
       }
     } catch (error) {
       logger.error(`Error adding token to graduation tracking:`, error);
@@ -285,7 +297,7 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
    * Emit graduation alert
    */
   private emitGraduationAlert(candidate: GraduationCandidate, level: 'APPROACHING' | 'IMMINENT'): void {
-    const marketCapPercentage = (candidate.marketCapUSD / this.GRADUATION_MARKET_CAP_USD) * 100;
+    const progressPercentage = candidate.curveProgress * 100;
     
     const alert = {
       type: level === 'IMMINENT' ? 'GRADUATION_IMMINENT' : 'GRADUATION_APPROACHING',
@@ -294,25 +306,30 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
       symbol: candidate.symbol,
       name: candidate.name,
       marketCapUSD: candidate.marketCapUSD,
-      targetMarketCapUSD: this.GRADUATION_MARKET_CAP_USD,
-      percentageToGraduation: marketCapPercentage,
+      targetMarketCapUSD: PUMP_FUN_CONSTANTS.GRADUATION_MARKET_CAP_USD,
+      progressPercent: progressPercentage,
       distanceToGraduation: candidate.distanceToGraduation,
       estimatedTimeMinutes: candidate.estimatedTimeToGraduation,
       currentPrice: candidate.currentPrice,
       estimatedPriceAtGraduation: candidate.priceAtGraduation,
+      currentSolPrice: solPriceService.getCurrentPrice(),
       timestamp: new Date(),
     };
 
     this.emit('graduationAlert', alert);
     
     const emoji = level === 'IMMINENT' ? '🚨' : '⚠️';
-    logger.warn(`${emoji} GRADUATION ${level}: ${candidate.symbol} at $${candidate.marketCapUSD.toFixed(0)} (${marketCapPercentage.toFixed(1)}% of target) - $${candidate.distanceToGraduation.toFixed(0)} to go!`);
+    logger.warn(`${emoji} GRADUATION ${level}: ${candidate.symbol} at ${progressPercentage.toFixed(1)}% progress - $${candidate.distanceToGraduation.toFixed(0)} to go!`);
   }
 
   /**
    * Update token graduation data in database
    */
-  private async updateTokenGraduationData(tokenAddress: string, candidate: GraduationCandidate): Promise<void> {
+  private async updateTokenGraduationData(
+    tokenAddress: string, 
+    candidate: GraduationCandidate,
+    tokensSold: number
+  ): Promise<void> {
     try {
       await db('tokens')
         .where('address', tokenAddress)
@@ -320,26 +337,28 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
           curve_progress: candidate.curveProgress,
           market_cap: candidate.marketCapUSD,
           price: candidate.currentPrice,
-          distance_to_graduation: candidate.distanceToGraduation, // Now in USD
+          distance_to_graduation: candidate.distanceToGraduation,
           estimated_graduation_time: candidate.estimatedTimeToGraduation 
-            ? Math.round(candidate.estimatedTimeToGraduation * 100) / 100 // Round to 2 decimal places
+            ? Math.round(candidate.estimatedTimeToGraduation * 100) / 100
             : null,
+          tokens_sold: tokensSold, // Store tokens sold if column exists
+          sol_price_at_update: solPriceService.getCurrentPrice(), // Store SOL price
           updated_at: new Date(),
         });
 
-    // Store graduation tracking snapshot - use created_at instead of timestamp
+      // Store graduation tracking snapshot
       await db('pump_fun_curve_snapshots').insert({
         token_address: tokenAddress,
-        created_at: new Date(), // Changed from 'timestamp' to 'created_at'
+        created_at: new Date(),
         sol_reserves: candidate.currentSolReserves,
         curve_progress: candidate.curveProgress,
-        price: candidate.currentPrice, // Now this column exists
-        distance_to_graduation: candidate.distanceToGraduation, // USD distance
-        market_cap_usd: candidate.marketCapUSD, // Add market cap for tracking
+        price: candidate.currentPrice,
+        distance_to_graduation: candidate.distanceToGraduation,
+        market_cap_usd: candidate.marketCapUSD,
       });
     } catch (error: any) {
       logger.error('Error updating graduation data:', error);
-    // If insert fails, try without created_at (it might have a default)
+      // If insert fails, try without created_at (it might have a default)
       if (error.code === '42703') {
         try {
           await db('pump_fun_curve_snapshots').insert({
@@ -349,16 +368,16 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
             price: candidate.currentPrice,
             distance_to_graduation: candidate.distanceToGraduation,
             market_cap_usd: candidate.marketCapUSD,
-          // created_at will use default value
+            // created_at will use default value
           });
         } catch (retryError) {
           logger.error('Retry also failed:', retryError);
         }
-        }
+      }
     }
   }
   
-            /**
+  /**
    * Get bonding curve address for a token
    */
   private async getBondingCurveAddress(tokenAddress: string): Promise<string | null> {
@@ -370,7 +389,7 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
   }
 
   private async connectWebSocket(): Promise<void> {
-    const wsUrl = config.discovery.pumpfunWsUrl || 'wss://pumpportal.fun/api/data';
+    const wsUrl = config.discovery.pumpfunWsUrl || PUMP_FUN_CONSTANTS.PUMP_FUN_WS_URL;
     
     try {
       this.ws = new WebSocket(wsUrl);
@@ -504,8 +523,8 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
       enhancedToken.virtualTokenReserves = tokenData.vTokensInBondingCurve;
     }
 
-    // Calculate market cap in USD
-    const solPriceUSD = 180; // You should get this from your price feed
+    // Calculate market cap in USD using dynamic SOL price
+    const solPriceUSD = solPriceService.getCurrentPrice();
     const marketCapUSD = (tokenData.marketCapSol || 0) * solPriceUSD;
     
     logger.info(`New PumpFun token: ${enhancedToken.symbol} (${enhancedToken.name}) - Market Cap: $${marketCapUSD.toFixed(0)}`);

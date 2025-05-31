@@ -7,8 +7,11 @@ import { writeDiscoveryEvent } from '../database/questdb';
 import { AddressValidator } from '../utils/address-validator';
 import { SmartTokenFilter } from './smart-token-filter';
 import { DexScreenerClient } from '../api/dexscreener-client';
-
+import { TokenMetadataFetcher } from '../utils/token-metadata-fetcher';
+import { getRateLimitedConnection } from '../utils/rpc-rate-limiter';
+import { Connection } from '@solana/web3.js';
 export class FilteredDiscoveryManager extends EventEmitter {
+  private metadataFetcher!: TokenMetadataFetcher;
   private monitors: Map<string, BaseMonitor> = new Map();
   private discoveredTokens: Set<string> = new Set();
   private tokenEnrichmentService: any;
@@ -28,10 +31,12 @@ export class FilteredDiscoveryManager extends EventEmitter {
     super();
     this.smartFilter = new SmartTokenFilter();
     this.dexScreener = new DexScreenerClient();
+    this.metadataFetcher = new TokenMetadataFetcher(getRateLimitedConnection() as Connection);
   }
 
   async initialize(): Promise<void> {
     logger.info('Initializing Filtered Discovery Manager');
+    this.metadataFetcher = new TokenMetadataFetcher(getRateLimitedConnection() as Connection);
     
     // Load existing tokens to prevent re-discovery
     await this.loadExistingTokens();
@@ -378,3 +383,8 @@ export class FilteredDiscoveryManager extends EventEmitter {
     };
   }
 }
+
+
+
+
+
