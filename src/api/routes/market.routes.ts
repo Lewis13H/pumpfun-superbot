@@ -5,7 +5,7 @@ import { MarketController } from '../controllers/market.controller';
 const router = Router();
 const marketController = new MarketController();
 
-router.get('/market/metrics', marketController.getMarketMetrics);
-router.get('/market/trends', marketController.getMarketTrends);
+router.get('/metrics', marketController.getMarketMetrics);
+router.get('/trends', marketController.getMarketTrends);
 
 export const marketRoutes = router;

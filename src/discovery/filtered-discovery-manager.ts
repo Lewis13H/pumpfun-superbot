@@ -52,7 +52,9 @@ export class FilteredDiscoveryManager extends EventEmitter {
         .first();
       
       if (settings && settings.setting_value) {
-        const filterConfig = JSON.parse(settings.setting_value);
+        const filterConfig = typeof settings.setting_value === 'string' 
+          ? JSON.parse(settings.setting_value) 
+          : settings.setting_value;
         this.activeFilterName = filterConfig.name;
         logger.info(`Loaded filter setting: ${this.activeFilterName}`);
       }
@@ -208,15 +210,15 @@ export class FilteredDiscoveryManager extends EventEmitter {
           const pumpfunData = (sanitizedToken.metadata as any)?.pumpfunData || (sanitizedToken as any).pumpfunData;
           
           if (pumpfunData?.real_sol_reserves) {
-            const solPrice = 240; // Approximate SOL price - could be made dynamic
+            const solPrice = 180; // Approximate SOL price - could be made dynamic
             const calculatedLiquidity = pumpfunData.real_sol_reserves * solPrice;
             marketData.liquidity = calculatedLiquidity;
             logger.info(`📊 PumpFun liquidity calculated from ${pumpfunData.real_sol_reserves} SOL = $${calculatedLiquidity.toFixed(2)}`);
           } else if (marketData.marketCap > 0) {
             // Fallback: estimate based on market cap for PumpFun bonding curve
             // PumpFun bonding curve typically has ~3-5% of market cap as SOL reserves
-            const estimatedSolReserves = (marketData.marketCap * 0.04) / 240; // 4% of MC in SOL
-            marketData.liquidity = estimatedSolReserves * 240;
+            const estimatedSolReserves = (marketData.marketCap * 0.04) / 180; // 4% of MC in SOL
+            marketData.liquidity = estimatedSolReserves * 180;
             logger.info(`📊 PumpFun liquidity estimated from MC: $${marketData.liquidity.toFixed(2)} (${estimatedSolReserves.toFixed(2)} SOL)`);
           }
         }
@@ -230,7 +232,29 @@ export class FilteredDiscoveryManager extends EventEmitter {
         }
       }
 
-      // Store in database with market data (now including calculated PumpFun liquidity)
+      // Extract pump.fun specific metadata
+      const metadata = sanitizedToken.metadata || {};
+      const pumpfunData: any = {};
+
+      // Check various possible locations for pump.fun data
+      if (sanitizedToken.platform === 'pumpfun') {
+        // Extract from metadata
+        pumpfunData.creator = metadata.creator || metadata.traderPublicKey;
+        pumpfunData.bonding_curve = metadata.bondingCurve || metadata.bonding_curve;
+        pumpfunData.associated_bonding_curve = metadata.associatedBondingCurve || metadata.associated_bonding_curve;
+        pumpfunData.creator_vault = metadata.creatorVault || metadata.creator_vault;
+        pumpfunData.initial_price_sol = metadata.initialPrice || metadata.initial_price;
+        pumpfunData.initial_liquidity_sol = metadata.initialSolAmount || metadata.initial_liquidity;
+        pumpfunData.is_pump_fun = true;
+        
+        // Calculate curve progress if we have market cap
+        if (marketData.marketCap > 0) {
+          pumpfunData.curve_progress = Math.min(marketData.marketCap / 69420, 1.0);
+          pumpfunData.distance_to_graduation = Math.max(69420 - marketData.marketCap, 0);
+        }
+      }
+
+      // Store in database with market data and pump.fun fields
       await db('tokens').insert({
         address: sanitizedToken.address,
         symbol: sanitizedToken.symbol || 'UNKNOWN',
@@ -238,11 +262,14 @@ export class FilteredDiscoveryManager extends EventEmitter {
         platform: sanitizedToken.platform,
         created_at: sanitizedToken.createdAt,
         discovered_at: new Date(),
-        // Store market data (now with PumpFun liquidity calculated)
+        decimals: 6, // Default for Solana tokens
+        // Market data
         market_cap: marketData.marketCap,
         current_price: marketData.price,
         liquidity: marketData.liquidity,
         volume_24h: marketData.volume24h,
+        // Add pump.fun specific fields
+        ...pumpfunData,
         // Store full metadata
         raw_data: JSON.stringify({
           ...sanitizedToken.metadata,
@@ -262,7 +289,7 @@ export class FilteredDiscoveryManager extends EventEmitter {
           market_cap: marketData.marketCap,
           total_liquidity: marketData.liquidity,
           volume_24h: marketData.volume24h,
-          graduation_distance: marketData.marketCap / 69000,
+          graduation_distance: pumpfunData.curve_progress || 0,
           liquidity_to_mc_ratio: marketData.marketCap > 0 ? marketData.liquidity / marketData.marketCap : 0,
           volume_to_liquidity_ratio: marketData.liquidity > 0 ? marketData.volume24h / marketData.liquidity : 0,
           last_updated: new Date()
@@ -280,6 +307,8 @@ export class FilteredDiscoveryManager extends EventEmitter {
 
       // Log discovery with market data
       logger.info(`New ACTIVE token saved: ${sanitizedToken.symbol} (${sanitizedToken.name}) - MC=$${marketData.marketCap}, Liq=$${marketData.liquidity}`);
+      logger.info(`  Creator: ${pumpfunData.creator || 'N/A'}`);
+      logger.info(`  Bonding Curve: ${pumpfunData.bonding_curve || 'N/A'}`);
 
       // Emit for further processing
       this.emit('tokenDiscovered', {
@@ -325,10 +354,10 @@ export class FilteredDiscoveryManager extends EventEmitter {
       await db('discovery_settings')
         .where('setting_key', 'active_filter')
         .update({
-          setting_value: JSON.stringify({ 
+          setting_value: {  // Remove JSON.stringify
             name: filterName,
             updatedAt: new Date()
-          })
+          }
         });
       
       logger.info(`Filter updated to: ${filterName}`);

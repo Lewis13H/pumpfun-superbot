@@ -1,0 +1,52 @@
+
+  private async storeFilteredToken(token: TokenDiscovery): Promise<void> {
+    // Optionally store filtered tokens in a separate table for analysis
+    try {
+      await db('filtered_tokens')
+        .insert({
+          address: token.address,
+          symbol: token.symbol,
+          name: token.name,
+          platform: token.platform,
+          filtered_at: new Date(),
+          filter_used: this.activeFilterName
+        })
+        .onConflict('address')
+        .ignore();
+    } catch (error) {
+      // Table might not exist, ignore
+    }
+  }
+
+  async updateFilter(filterName: string): Promise<void> {
+    if (this.smartFilter.getFilters().has(filterName)) {
+      this.activeFilterName = filterName;
+      
+      // Save to database
+      await db('discovery_settings')
+        .where('setting_key', 'active_filter')
+        .update({
+          setting_value: {  // Remove JSON.stringify
+            name: filterName,
+            updatedAt: new Date()
+          }
+        });
+      
+      logger.info(`Filter updated to: ${filterName}`);
+    } else {
+      logger.error(`Unknown filter: ${filterName}`);
+    }
+  }
+
+  getStats() {
+    return {
+      ...this.stats,
+      monitorsActive: this.monitors.size,
+      uniqueTokens: this.discoveredTokens.size,
+      activeFilter: this.activeFilterName,
+      filterPassRate: this.stats.totalDiscovered > 0 
+        ? ((this.stats.passedFilter / this.stats.totalDiscovered) * 100).toFixed(2) + '%'
+        : '0%'
+    };
+  }
+}

@@ -24,7 +24,7 @@ export class SmartTokenFilter extends EventEmitter {
   }
 
   private setupDefaultFilters() {
-    // Different filter presets - Updated to match user requirements
+    // LEGACY FILTERS (keeping for backwards compatibility)
     this.filters.set('strict', {
       minMarketCap: 1000, // MC > $1K
       minLiquidity: 500,  // Liquidity > $500
@@ -50,15 +50,76 @@ export class SmartTokenFilter extends EventEmitter {
       requireLiquidity: true,
       requireName: false   // Allow tokens without proper names for very new tokens
     });
+
+    // NEW QUALITY FILTERS
+    
+    // Quality new tokens with some traction
+    this.filters.set('quality_new', {
+      minMarketCap: 5000,    // $5K minimum
+      minLiquidity: 2000,    // $2K minimum liquidity
+      minVolume24h: 1000,    // $1K daily volume
+      requireLiquidity: true,
+      requireName: true
+    });
+
+    // Established tokens with good metrics
+    this.filters.set('established', {
+      minMarketCap: 20000,   // $20K minimum
+      minLiquidity: 5000,    // $5K minimum liquidity
+      minVolume24h: 5000,    // $5K daily volume
+      requireLiquidity: true,
+      requireName: true
+    });
+
+    // Near graduation (approaching $69,420)
+    this.filters.set('near_graduation', {
+      minMarketCap: 50000,   // $50K minimum (72% of graduation)
+      minLiquidity: 10000,   // $10K minimum liquidity
+      requireLiquidity: true,
+      requireName: true
+    });
+
+    // High quality only
+    this.filters.set('premium', {
+      minMarketCap: 30000,   // $30K minimum
+      minLiquidity: 10000,   // $10K minimum liquidity
+      minVolume24h: 10000,   // $10K daily volume
+      requireLiquidity: true,
+      requireName: true
+    });
+
+    // Accept all for testing (CAUTION: discovers all tokens)
+    this.filters.set('accept_all', {
+      minMarketCap: 0,
+      minLiquidity: 0,
+      requireLiquidity: false,
+      requireName: false
+    });
   }
 
   async shouldProcessToken(token: TokenDiscovery, filterName: string = 'moderate'): Promise<boolean> {
+    // TEMPORARY: Accept all tokens for testing
+    if (filterName === 'accept_all') {
+      logger.info(`BYPASS: Accepting token ${token.symbol} without checks`);
+      this.emit('tokenPassedFilter', {
+        token,
+        marketData: {
+          marketCap: token.metadata?.marketCap || 0,
+          liquidity: token.metadata?.liquidity || 0,
+          volume24h: 0,
+          price: token.metadata?.price || 0
+        },
+        filterName
+      });
+      return true;
+    }
+
     const criteria = this.filters.get(filterName) || this.filters.get('moderate')!;
 
     // Quick checks first - More lenient name checking
-    if (criteria.requireName && (!token.name || 
-        token.name === 'Unknown Token' || 
-        token.name === 'UNKNOWN' || 
+    if (criteria.requireName && (!token.name ||
+        token.name === 'Unknown Token' ||
+        token.name === 'UNKNOWN' ||
         token.name.trim() === '' ||
         (token.name.includes('PUMP-NEW') && filterName !== 'new_with_traction'))) {
       logger.debug(`Skipping token without proper name: ${token.address} (name: ${token.name})`);
@@ -71,117 +132,109 @@ export class SmartTokenFilter extends EventEmitter {
       return false;
     }
 
-    // Check on DexScreener for market data
+    // Try to get market data from metadata first (for PumpFun tokens)
+    let marketCap = 0;
+    let liquidity = 0;
+    let volume24h = 0;
+    let price = 0;
+
+    // Check if we have PumpFun data in metadata
+    if (token.platform === 'pumpfun' && token.metadata) {
+      const metadata = token.metadata as any;
+      
+      // Calculate market cap from SOL market cap if available
+      if (metadata.marketCapSol) {
+        const solPrice = 180; // Approximate SOL price
+        marketCap = metadata.marketCapSol * solPrice;
+      }
+      
+      // Calculate liquidity from virtual reserves
+      if (metadata.virtualSolReserves) {
+        const solPrice = 180;
+        liquidity = metadata.virtualSolReserves * solPrice;
+      }
+      
+      // Get price if available
+      if (metadata.initialPrice) {
+        price = metadata.initialPrice;
+      }
+      
+      logger.debug(`PumpFun token ${token.symbol} - MC: ${marketCap.toFixed(2)}, Liq: ${liquidity.toFixed(2)}`);
+    }
+
+    // Check on DexScreener for market data (but don't require it)
     try {
       const pairs = await this.dexScreener.getTokenPairs(token.address);
-      
-      if (!pairs || pairs.length === 0) {
-        // For new_with_traction, allow tokens without trading pairs if they're very new
-        if (filterName === 'new_with_traction') {
-          const tokenAge = Date.now() - token.createdAt.getTime();
-          if (tokenAge < 5 * 60 * 1000) { // Less than 5 minutes old
-            logger.info(`Allowing very new token without trading pairs: ${token.symbol} (${Math.round(tokenAge / 1000)}s old)`);
-            
-            // Emit event with minimal data
-            this.emit('tokenPassedFilter', {
-              token,
-              marketData: {
-                marketCap: 0,
-                liquidity: 0,
-                volume24h: 0,
-                price: 0
-              },
-              filterName
-            });
-            
-            return true;
-          }
-        }
+
+      if (pairs && pairs.length > 0) {
+        const primaryPair = pairs[0];
         
-        logger.debug(`No trading pairs found for ${token.symbol}`);
-        return false;
-      }
-
-      const primaryPair = pairs[0];
-      
-      // Get basic market data from DexScreener
-      let marketCap = parseFloat(primaryPair.fdv?.toString() || '0');
-      let liquidity = parseFloat(primaryPair.liquidity?.toString() || '0');
-      let volume24h = parseFloat(primaryPair.volume24h?.toString() || '0');
-      const price = primaryPair.priceUsd;
-
-      // For PumpFun tokens, calculate liquidity from SOL reserves if DexScreener reports zero
-      if (token.platform === 'pumpfun' && liquidity === 0) {
-        // Check if we have PumpFun-specific data in token metadata
-        const pumpfunData = (token.metadata as any)?.pumpfunData || (token as any).pumpfunData;
+        // Override with DexScreener data if available
+        marketCap = parseFloat(primaryPair.fdv?.toString() || '0') || marketCap;
+        liquidity = parseFloat(primaryPair.liquidity?.toString() || '0') || liquidity;
+        volume24h = parseFloat(primaryPair.volume24h?.toString() || '0');
+        price = primaryPair.priceUsd || price;
         
-        if (pumpfunData?.real_sol_reserves) {
-          const solPrice = 240; // Approximate SOL price - could be made dynamic
-          const calculatedLiquidity = pumpfunData.real_sol_reserves * solPrice;
-          liquidity = calculatedLiquidity;
-          logger.info(`📊 PumpFun liquidity calculated from ${pumpfunData.real_sol_reserves} SOL = $${calculatedLiquidity.toFixed(2)}`);
-        } else {
-          // Fallback: estimate based on market cap for PumpFun bonding curve
-          if (marketCap > 0) {
-            // PumpFun bonding curve typically has ~3-5% of market cap as SOL reserves
-            const estimatedSolReserves = (marketCap * 0.04) / 240; // 4% of MC in SOL
-            liquidity = estimatedSolReserves * 240;
-            logger.info(`📊 PumpFun liquidity estimated from MC: $${liquidity.toFixed(2)} (${estimatedSolReserves.toFixed(2)} SOL)`);
-          }
-        }
+        logger.debug(`DexScreener data for ${token.symbol} - MC: ${marketCap.toFixed(2)}, Liq: ${liquidity.toFixed(2)}`);
+      } else {
+        logger.debug(`No DexScreener pairs for ${token.symbol}, using metadata values`);
       }
-
-      // Check liquidity requirement (now using calculated PumpFun liquidity if available)
-      if (criteria.requireLiquidity && liquidity === 0) {
-        logger.debug(`No liquidity for ${token.symbol} (including PumpFun calculation)`);
-        return false;
-      }
-
-      // Check thresholds
-      if (criteria.minMarketCap && marketCap < criteria.minMarketCap) {
-        logger.debug(`Market cap too low for ${token.symbol}: $${marketCap} < $${criteria.minMarketCap}`);
-        return false;
-      }
-
-      if (criteria.minLiquidity && liquidity < criteria.minLiquidity) {
-        logger.debug(`Liquidity too low for ${token.symbol}: $${liquidity} < $${criteria.minLiquidity}`);
-        return false;
-      }
-
-      if (criteria.minVolume24h && volume24h < criteria.minVolume24h) {
-        logger.debug(`Volume too low for ${token.symbol}: $${volume24h} < $${criteria.minVolume24h}`);
-        return false;
-      }
-
-      // Token passes all filters
-      logger.info(`✓ Token ${token.symbol} passes ${filterName} filter: MC=$${marketCap}, Liq=$${liquidity}${token.platform === 'pumpfun' ? ' (PumpFun calculated)' : ''}`);
-      
-      // Emit event with market data (including calculated liquidity)
-      this.emit('tokenPassedFilter', {
-        token,
-        marketData: {
-          marketCap,
-          liquidity,
-          volume24h,
-          price
-        },
-        filterName
-      });
-
-      return true;
 
     } catch (error) {
-      logger.error(`Error checking token ${token.address}:`, error);
+      logger.debug(`Error fetching DexScreener data for ${token.symbol}:`, error);
+      // Continue with metadata values if DexScreener fails
+    }
+
+    // If we still don't have market cap or liquidity, skip tokens that require them
+    if (marketCap === 0 && liquidity === 0 && criteria.minMarketCap && criteria.minMarketCap > 0) {
+      logger.debug(`Token ${token.symbol} has no market data available`);
       return false;
     }
-  }
 
-  addCustomFilter(name: string, criteria: FilterCriteria) {
-    this.filters.set(name, criteria);
-    logger.info(`Added custom filter: ${name}`, criteria);
+    // Check liquidity requirement
+    if (criteria.requireLiquidity && (!liquidity || liquidity < (criteria.minLiquidity || 0))) {
+      logger.debug(`Token ${token.symbol} failed liquidity check: ${liquidity} < ${criteria.minLiquidity}`);
+      return false;
+    }
+
+    // Check market cap requirement
+    if (criteria.minMarketCap && marketCap < criteria.minMarketCap) {
+      logger.debug(`Token ${token.symbol} failed market cap check: ${marketCap} < ${criteria.minMarketCap}`);
+      return false;
+    }
+
+    // Check volume requirement
+    if (criteria.minVolume24h && volume24h < criteria.minVolume24h) {
+      logger.debug(`Token ${token.symbol} failed volume check: ${volume24h} < ${criteria.minVolume24h}`);
+      return false;
+    }
+
+    // All checks passed - emit event with market data
+    this.emit('tokenPassedFilter', {
+      token,
+      marketData: {
+        marketCap,
+        liquidity,
+        volume24h,
+        price
+      },
+      filterName
+    });
+
+    logger.info(`✅ Token ${token.symbol} passed ${filterName} filter - MC: ${marketCap.toFixed(2)}, Liq: ${liquidity.toFixed(2)}, Vol: ${volume24h.toFixed(2)}`);
+
+    return true;
   }
 
   getFilters(): Map<string, FilterCriteria> {
     return this.filters;
+  }
+
+  getFilterNames(): string[] {
+    return Array.from(this.filters.keys());
+  }
+
+  getFilterCriteria(filterName: string): FilterCriteria | undefined {
+    return this.filters.get(filterName);
   }
 }

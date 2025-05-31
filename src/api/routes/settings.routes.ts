@@ -5,7 +5,7 @@ import { SettingsController } from '../controllers/settings.controller';
 const router = Router();
 const settingsController = new SettingsController();
 
-router.get('/settings', settingsController.getSettings);
-router.put('/settings', settingsController.updateSettings);
+router.get('/', settingsController.getSettings);
+router.put('/', settingsController.updateSettings);
 
 export const settingsRoutes = router;

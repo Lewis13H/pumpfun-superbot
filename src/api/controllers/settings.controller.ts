@@ -50,14 +50,15 @@ export class SettingsController {
         const savedSettings = await fs.readFile(this.settingsPath, 'utf-8');
         settings = { ...this.defaultSettings, ...JSON.parse(savedSettings) };
       } catch (error) {
-        // File doesn't exist, use defaults
-        logger.info('No saved settings found, using defaults');
+        // File doesn't exist or can't be read, use defaults
+        logger.info('No saved settings found or file error, using defaults:', error);
       }
 
       res.json(settings);
     } catch (error) {
       logger.error('Error fetching settings:', error);
-      res.status(500).json({ error: 'Failed to fetch settings' });
+      // Return default settings instead of failing
+      res.json(this.defaultSettings);
     }
   }
 
