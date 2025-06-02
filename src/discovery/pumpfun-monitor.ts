@@ -336,7 +336,7 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
         .update({
           curve_progress: candidate.curveProgress,
           market_cap: candidate.marketCapUSD,
-          price: candidate.currentPrice,
+          current_price: candidate.currentPrice,
           distance_to_graduation: candidate.distanceToGraduation,
           estimated_graduation_time: candidate.estimatedTimeToGraduation 
             ? Math.round(candidate.estimatedTimeToGraduation * 100) / 100
@@ -352,7 +352,7 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
         created_at: new Date(),
         sol_reserves: candidate.currentSolReserves,
         curve_progress: candidate.curveProgress,
-        price: candidate.currentPrice,
+        current_price: candidate.currentPrice,
         distance_to_graduation: candidate.distanceToGraduation,
         market_cap_usd: candidate.marketCapUSD,
       });
@@ -365,7 +365,7 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
             token_address: tokenAddress,
             sol_reserves: candidate.currentSolReserves,
             curve_progress: candidate.curveProgress,
-            price: candidate.currentPrice,
+            current_price: candidate.currentPrice,
             distance_to_graduation: candidate.distanceToGraduation,
             market_cap_usd: candidate.marketCapUSD,
             // created_at will use default value

@@ -1,0 +1,33 @@
+// Fix for filtered-discovery-manager.ts
+// Find this section around line 170-180 where marketData is defined:
+
+let marketData = {
+  marketCap: 0,
+  price: 0,  // Use 'price' internally
+  liquidity: 0,
+  volume24h: 0
+};
+
+// When getting data from DexScreener:
+if (pairs && pairs.length > 0) {
+  const pair = pairs[0];
+  marketData = {
+    marketCap: parseFloat(pair.fdv?.toString() || '0'),
+    price: parseFloat(pair.priceUsd?.toString() || '0'),  // 'price' here
+    liquidity: parseFloat(pair.liquidity?.toString() || '0'),
+    volume24h: parseFloat(pair.volume24h?.toString() || '0')
+  };
+}
+
+// When saving to database around line 235:
+await db('tokens').insert({
+  // ... other fields ...
+  
+  // Market data
+  market_cap: marketData.marketCap,
+  current_price: marketData.price,  // Map 'price' to 'current_price' column
+  liquidity: marketData.liquidity,
+  volume_24h: marketData.volume24h,
+  
+  // ... rest of fields ...
+});

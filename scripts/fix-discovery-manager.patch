@@ -1,0 +1,9 @@
+--- filtered-discovery-manager.ts
++++ filtered-discovery-manager.ts
+@@ -XX,7 +XX,7 @@
+           // Market data
+           market_cap: marketData.marketCap,
+-          price: marketData.price,
++          current_price: marketData.price,
+           liquidity: marketData.liquidity,
+           volume_24h: marketData.volume24h,

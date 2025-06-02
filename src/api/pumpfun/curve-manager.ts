@@ -19,7 +19,7 @@ export interface BondingCurveState {
   complete: boolean;
   
   // Calculated values
-  price: number; // Price in SOL per token
+  current_price: number; // Price in SOL per token
   marketCapSol: number;
   solReserves: number; // Real SOL reserves in SOL
   tokenReserves: number; // Real token reserves
@@ -29,7 +29,7 @@ export interface BondingCurveState {
 }
 
 export class BondingCurveManager {
-  private solPriceUSD: number = 180; // Default SOL price, should be updated
+  private solPriceUSD: number = 180; // Default SOL current_price, should be updated
   private connection: RateLimitedConnection;
 
   constructor() {
@@ -59,8 +59,8 @@ export class BondingCurveManager {
       const complete = data.readUInt8(48) === 1;
 
       // Calculate derived values
-      const price = this.calculatePrice(virtualSolReserves, virtualTokenReserves);
-      const marketCapSol = this.calculateMarketCap(tokenTotalSupply, price);
+      const current_price = this.calculatePrice(virtualSolReserves, virtualTokenReserves);
+      const marketCapSol = this.calculateMarketCap(tokenTotalSupply, current_price);
       const progress = this.calculateProgress(realSolReserves);
 
       return {
@@ -70,7 +70,7 @@ export class BondingCurveManager {
         realSolReserves,
         tokenTotalSupply,
         complete,
-        price,
+        current_price,
         marketCapSol,
         solReserves: Number(realSolReserves) / LAMPORTS_PER_SOL,
         tokenReserves: Number(realTokenReserves) / CURVE_TOKEN_DECIMALS,
@@ -131,3 +131,11 @@ export class BondingCurveManager {
     return solAmount * 1000000; // Placeholder
   }
 }
+
+
+
+
+
+
+
+

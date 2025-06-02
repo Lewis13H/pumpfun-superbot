@@ -30,7 +30,7 @@ router.get('/live', async (req, res) => {
           'created_at',
           'discovered_at',
           'market_cap',
-          'current_price as price',
+          'price',
           'liquidity',
           'volume_24h'
         )
@@ -151,7 +151,7 @@ router.get('/:address', async (req, res) => {
       symbol: token.symbol || 'UNKNOWN',
       name: token.name || 'Unknown Token',
       marketCap: parseFloat(token.market_cap) || 0,
-      price: parseFloat(token.current_price) || 0,
+      current_price: parseFloat(token.price) || 0,
       priceChange24h: parseFloat(token.price_change_24h) || 0,
       volume24h: parseFloat(token.volume_24h) || 0,
       liquidity: parseFloat(token.liquidity) || 0,
@@ -295,3 +295,4 @@ function generateMockSmartMoneyActivity() {
 }
 
 export default router;
+

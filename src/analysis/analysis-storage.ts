@@ -18,7 +18,7 @@ export class TokenAnalysisStorage {
           volume24h: analysis.metrics.volume24h,
         }),
         trading_data: JSON.stringify({
-          price: analysis.metrics.price,
+          current_price: analysis.metrics.price,
           priceChange24h: analysis.metrics.priceChange24h,
           marketCap: analysis.metrics.marketCap,
         }),
@@ -44,7 +44,7 @@ export class TokenAnalysisStorage {
       await db('tokens')
         .where('address', analysis.tokenAddress)
         .update({
-          price: analysis.metrics.price,
+          current_price: analysis.metrics.price,
           market_cap: analysis.metrics.marketCap,
           volume_24h: analysis.metrics.volume24h,
           liquidity: analysis.metrics.liquidity,

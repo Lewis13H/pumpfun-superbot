@@ -8,6 +8,11 @@ import { closeQuestDB } from './database/questdb';
 import { discoveryService } from './discovery/discovery-service';
 import { TokenEnrichmentService } from './analysis/token-enrichment-service';
 import { Server as SocketIOServer } from 'socket.io';
+import { categoryManager } from './category/category-manager';
+import { scanScheduler } from './category/scan-scheduler';
+import { buySignalEvaluator } from './trading/buy-signal-evaluator';
+import { buySignalService } from './trading/buy-signal-service';
+import { categoryConfig } from './config/category-config';
 
 // Create HTTP server
 const httpServer = createServer(app);
@@ -60,12 +65,19 @@ async function bootstrap() {
     // Initialize Token Enrichment Service
     tokenEnrichmentService = new TokenEnrichmentService();
     await tokenEnrichmentService.start();
-    logger.info('Token Enrichment Service started');
+    logger.info('Token Enrichment Service started with category-based scanning');
+
+    await scanScheduler.start();
+    logger.info('Scan Scheduler started');
+
+    // Initialize Buy Signal Service
+    await buySignalService.start();
+    logger.info('Buy Signal Service started');
     
     // Connect enrichment service to discovery manager
     const discoveryManager = (discoveryService as any).discoveryManager;
     if (discoveryManager) {
-      discoveryManager.setEnrichmentService(tokenEnrichmentService);
+//       discoveryManager.setEnrichmentService(tokenEnrichmentService); // REMOVED - not needed in V1.2
       logger.info('Connected enrichment service to discovery manager');
     }
     
@@ -90,6 +102,7 @@ async function bootstrap() {
     // Set global references for API access
     (global as any).discoveryService = discoveryService;
     (global as any).tokenEnrichmentService = tokenEnrichmentService;
+    (global as any).buySignalService = buySignalService;
     
     // Log system status periodically
     setInterval(() => {
@@ -139,7 +152,7 @@ function setupWebSocketEvents() {
       io.to('tokens').emit('token-enriched', {
         address: enrichedData.address,
         marketCap: enrichedData.marketCap,
-        price: enrichedData.price,
+        current_price: enrichedData.price,
         liquidity: enrichedData.liquidity,
         volume24h: enrichedData.volume24h,
         enrichedAt: new Date()
@@ -147,6 +160,86 @@ function setupWebSocketEvents() {
       logger.debug(`Emitted enriched token data: ${enrichedData.address}`);
     });
   }
+
+  // Category change events
+  categoryManager.on('categoryChange', (event: any) => {
+    io.to('categories').emit('category-change', {
+      tokenAddress: event.tokenAddress,
+      symbol: event.symbol || event.tokenAddress.slice(0, 8),
+      fromCategory: event.fromCategory,
+      toCategory: event.toCategory,
+      marketCap: event.marketCap,
+      reason: 'market_cap_change',
+      timestamp: event.timestamp,
+    });
+  });
+
+  // AIM evaluation events
+  buySignalEvaluator.on('evaluationComplete', async (evaluation: any) => {
+    const token = await db('tokens')
+      .where('address', evaluation.tokenAddress)
+      .first();
+    
+    io.to('buy-signals').emit('aim-evaluation', {
+      tokenAddress: evaluation.tokenAddress,
+      symbol: token?.symbol || evaluation.tokenAddress.slice(0, 8),
+      evaluationId: Date.now(),
+      passed: evaluation.passed,
+      criteria: evaluation.criteria,
+      positionSize: evaluation.recommendedPosition,
+      confidence: evaluation.confidence,
+      timestamp: evaluation.timestamp,
+    });
+  });
+
+  // Scan complete events
+  scanScheduler.on('scanComplete', async ({ task, result }: any) => {
+    const token = await db('tokens')
+      .where('address', task.tokenAddress)
+      .first();
+    
+    io.to('scans').emit('scan-complete', {
+      tokenAddress: task.tokenAddress,
+      symbol: token?.symbol || task.tokenAddress.slice(0, 8),
+      category: task.category,
+      scanNumber: task.scanNumber,
+      marketCap: result.marketCap || 0,
+      changes: {}, // TODO: Calculate changes
+      nextScanIn: categoryConfig.scanIntervals[task.category as keyof typeof categoryConfig.scanIntervals].interval,
+    });
+  });
+
+  // Category stats every 10 seconds
+  setInterval(async () => {
+    const distribution = await categoryManager.getCategoryDistribution();
+    const aimTokens = await db('tokens').where('category', 'AIM').count('* as count').first();
+    
+    // Get recent transitions
+    const recentTransitions = await db('category_transitions as ct')
+      .join('tokens as t', 'ct.token_address', 't.address')
+      .where('ct.created_at', '>', new Date(Date.now() - 5 * 60 * 1000))
+      .orderBy('ct.created_at', 'desc')
+      .limit(5)
+      .select('t.symbol', 'ct.from_category', 'ct.to_category');
+    
+    const stats = scanScheduler.getStats();
+    const activeScans: any = {};
+    Object.entries(stats).forEach(([cat, data]: [string, any]) => {
+      activeScans[cat] = data.activeScans || 0;
+    });
+    
+    io.to('category-stats').emit('category-stats', {
+      distribution,
+      recentTransitions: recentTransitions.map(t => ({
+        symbol: t.symbol,
+        from: t.from_category,
+        to: t.to_category,
+      })),
+      aimTokensCount: Number(aimTokens?.count) || 0,
+      activeScans,
+      timestamp: new Date(),
+    });
+  }, 10000);
 
   // Emit stats updates every 5 seconds
   setInterval(() => {
@@ -192,6 +285,12 @@ async function gracefulShutdown() {
     if (tokenEnrichmentService) {
       await tokenEnrichmentService.stop();
       logger.info('Token enrichment service stopped');
+    }
+
+    // Stop buy signal service
+    if (buySignalService) {
+      await buySignalService.stop();
+      logger.info('Buy signal service stopped');
     }
     
     // Close HTTP server

@@ -48,7 +48,7 @@ export class TokenController {
         createdAt: token.created_at,
         discoveredAt: token.discovered_at,
         marketCap: Number(token.market_cap || 0),
-        price: Number(token.price || 0),
+        current_price: Number(token.price || 0),
         priceChange24h: Number(token.price_change_24h || 0),
         volume24h: Number(token.volume_24h || 0),
         liquidity: Number(token.liquidity || 0),
@@ -110,7 +110,7 @@ export class TokenController {
         symbol: token.symbol,
         name: token.name,
         marketCap: Number(token.market_cap || 0),
-        price: Number(token.price || 0),
+        current_price: Number(token.price || 0),
         priceChange24h: Number(token.price_change_24h || 0),
         volume24h: Number(token.volume_24h || 0),
         liquidity: Number(token.liquidity || 0),
@@ -131,7 +131,7 @@ export class TokenController {
         })),
         priceHistory: priceHistory.map(point => ({
           time: new Date(point.time).toLocaleTimeString(),
-          price: Number(point.price)
+          current_price: Number(point.price)
         })),
         holderDistribution,
         smartMoneyActivity

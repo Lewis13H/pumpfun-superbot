@@ -102,12 +102,12 @@ export class PumpFunExponentialBondingCurve {
     return {
       start: {
         marketCap: this.INITIAL_MARKET_CAP,
-        price: this.calculatePriceAtMarketCap(this.INITIAL_MARKET_CAP),
+        current_price: this.calculatePriceAtMarketCap(this.INITIAL_MARKET_CAP),
         priceUSD: this.calculatePriceAtMarketCap(this.INITIAL_MARKET_CAP) * this.solPriceUSD
       },
       graduation: {
         marketCap: this.FINAL_MARKET_CAP,
-        price: this.calculatePriceAtMarketCap(this.FINAL_MARKET_CAP),
+        current_price: this.calculatePriceAtMarketCap(this.FINAL_MARKET_CAP),
         priceUSD: this.calculatePriceAtMarketCap(this.FINAL_MARKET_CAP) * this.solPriceUSD,
         totalRaisedUSD: this.TOTAL_RAISED,
         totalRaisedSOL: this.TOTAL_RAISED / this.solPriceUSD
@@ -126,3 +126,4 @@ export class PumpFunExponentialBondingCurve {
 }
 
 export const exponentialBondingCurve = new PumpFunExponentialBondingCurve();
+

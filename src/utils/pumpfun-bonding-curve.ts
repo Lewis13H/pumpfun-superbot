@@ -28,7 +28,7 @@ export class PumpFunBondingCurve {
   
   public setSolPrice(priceUSD: number): void {
     if (priceUSD <= 0) {
-      logger.warn(`Invalid SOL price: ${priceUSD}`);
+      logger.warn(`Invalid SOL current_price: ${priceUSD}`);
       return;
     }
     this.solPriceUSD = priceUSD;
@@ -172,3 +172,4 @@ export class PumpFunBondingCurve {
 
 // Export singleton instance
 export const bondingCurveCalculator = new PumpFunBondingCurve();
+

@@ -1,41 +1,31 @@
-// src/analysis/token-enrichment-service.ts
 import { EventEmitter } from 'events';
 import { logger } from '../utils/logger';
 import { db } from '../database/postgres';
-import { DexScreenerClient, DexScreenerPair } from '../api/dexscreener-client';
-import { BirdeyeClient } from '../api/birdeye-client';
-import { HeliusClient } from '../api/helius-client';
-import { config } from '../config';
+import { TokenCategory, categoryConfig } from '../config/category-config';
+import { categoryAPIRouter } from './category-api-router';
+import { scanScheduler } from '../category/scan-scheduler';
+import { ScanTask, ScanResult } from '../category/scan-task.interface';
 
 export class TokenEnrichmentService extends EventEmitter {
-  private dexScreener: DexScreenerClient;
-  private birdeye: BirdeyeClient;
-  private helius: HeliusClient;
-  private enrichmentQueue: Set<string> = new Set();
   private isRunning: boolean = false;
-
+  
   constructor() {
     super();
-    this.dexScreener = new DexScreenerClient();
-    this.birdeye = new BirdeyeClient(config.apis.birdeyeApiKey);
-    this.helius = new HeliusClient(config.apis.heliusRpcUrl);
   }
 
   async start(): Promise<void> {
     if (this.isRunning) return;
     
-    logger.info('Starting Token Enrichment Service...');
+    logger.info('Starting Token Enrichment Service (Category-based)...');
     this.isRunning = true;
 
-    // Process queue every 5 seconds
-    setInterval(() => {
-      if (this.enrichmentQueue.size > 0) {
-        this.processQueue();
-      }
-    }, 5000);
-
-    // Initial enrichment of tokens without metrics
-    await this.enrichExistingTokens();
+    // Register scan handlers for each category
+    this.registerScanHandlers();
+    
+    // Start monitoring for AIM upgrades
+    this.startAimUpgradeMonitoring();
+    
+    logger.info('Token Enrichment Service started');
   }
 
   async stop(): Promise<void> {
@@ -43,167 +33,113 @@ export class TokenEnrichmentService extends EventEmitter {
     logger.info('Token Enrichment Service stopped');
   }
 
-  async enrichToken(tokenAddress: string): Promise<void> {
-    if (!tokenAddress) return;
+  /**
+   * Register scan handlers with the scheduler
+   */
+  private registerScanHandlers(): void {
+    const categories: TokenCategory[] = ['NEW', 'LOW', 'MEDIUM', 'HIGH', 'AIM', 'ARCHIVE'];
     
-    this.enrichmentQueue.add(tokenAddress);
-    logger.debug(`Token ${tokenAddress} added to enrichment queue`);
-  }
-
-  private async processQueue(): Promise<void> {
-    const tokensToProcess = Array.from(this.enrichmentQueue).slice(0, 10);
-    
-    for (const tokenAddress of tokensToProcess) {
-      this.enrichmentQueue.delete(tokenAddress);
-      
-      try {
-        await this.enrichSingleToken(tokenAddress);
-      } catch (error) {
-        logger.error(`Failed to enrich token ${tokenAddress}:`, error);
-      }
-    }
-  }
-
-  private async enrichSingleToken(tokenAddress: string): Promise<void> {
-    logger.info(`Enriching token: ${tokenAddress}`);
-
-    try {
-      // Fetch data from multiple sources
-      const [dexData, tokenInfo] = await Promise.allSettled([
-        this.dexScreener.getTokenPairs(tokenAddress),
-        this.getTokenInfo(tokenAddress)
-      ]);
-
-      // Parse DexScreener data
-      let marketData: any = {
-        marketCap: 0,
-        price: 0,
-        liquidity: 0,
-        volume24h: 0,
-        priceChange24h: 0,
-        holders: 0
-      };
-
-      if (dexData.status === 'fulfilled' && dexData.value && dexData.value.length > 0) {
-        const primaryPair = dexData.value[0];
-        marketData = {
-          marketCap: parseFloat(primaryPair.fdv?.toString() || '0'),
-          price: parseFloat(primaryPair.priceUsd?.toString() || '0'),
-          liquidity: parseFloat(primaryPair.liquidity?.toString() || '0'),
-          volume24h: parseFloat(primaryPair.volume24h?.toString() || '0'),
-          priceChange24h: parseFloat(primaryPair.priceChange24h?.toString() || '0'),
-          holders: 0 // DexScreener doesn't provide holder count
-        };
-      }
-
-      // Update token table with basic data
-      await db('tokens')
-        .where('address', tokenAddress)
-        .update({
-          market_cap: marketData.marketCap,
-          current_price: marketData.price,
-          liquidity: marketData.liquidity,
-          volume_24h: marketData.volume24h,
-          price_change_24h: marketData.priceChange24h,
-          updated_at: new Date()
-        });
-
-      // Create or update enhanced metrics
-      const graduationDistance = this.calculateGraduationDistance(marketData.marketCap);
-      const volumeToLiquidityRatio = marketData.liquidity > 0 ? marketData.volume24h / marketData.liquidity : 0;
-
-      await db('enhanced_token_metrics')
-        .insert({
-          token_address: tokenAddress,
-          market_cap: marketData.marketCap,
-          market_cap_trend: 'UNKNOWN',
-          market_cap_velocity: 0,
-          graduation_distance: graduationDistance,
-          total_liquidity: marketData.liquidity,
-          liquidity_locked_percentage: 0,
-          lp_burned: false,
-          slippage_1k: 0,
-          liquidity_to_mc_ratio: marketData.marketCap > 0 ? marketData.liquidity / marketData.marketCap : 0,
-          volume_24h: marketData.volume24h,
-          volume_trend: 'UNKNOWN',
-          volume_to_liquidity_ratio: volumeToLiquidityRatio,
-          unique_traders_24h: 0,
-          avg_trade_size: 0,
-          buy_count_24h: 0,
-          sell_count_24h: 0,
-          buy_pressure: 0.5,
-          total_tx_count_24h: 0,
-          large_tx_count_24h: 0,
-          price_change_24h: marketData.priceChange24h,
-          holder_count: marketData.holders,
-          last_updated: new Date()
-        })
-        .onConflict('token_address')
-        .merge([
-          'market_cap',
-          'total_liquidity',
-          'volume_24h',
-          'price_change_24h',
-          'graduation_distance',
-          'liquidity_to_mc_ratio',
-          'volume_to_liquidity_ratio',
-          'last_updated'
-        ]);
-
-      logger.info(`Token ${tokenAddress} enriched successfully with market cap: $${marketData.marketCap}`);
-      
-      // Emit event for other services
-      this.emit('tokenEnriched', {
-        address: tokenAddress,
-        marketCap: marketData.marketCap,
-        price: marketData.price,
-        liquidity: marketData.liquidity,
-        volume24h: marketData.volume24h
+    categories.forEach(category => {
+      scanScheduler.registerScanHandler(category, async (task: ScanTask) => {
+        return await this.performCategoryScan(task);
       });
-
-    } catch (error) {
-      logger.error(`Error enriching token ${tokenAddress}:`, error);
-      throw error;
-    }
+    });
+    
+    logger.info('Registered enrichment handlers for all categories');
   }
 
-  private async enrichExistingTokens(): Promise<void> {
+  /**
+   * Perform scan for a task
+   */
+  private async performCategoryScan(task: ScanTask): Promise<ScanResult> {
+    const startTime = Date.now();
+    
     try {
-      // Find tokens without market data
-      const tokensWithoutMetrics = await db('tokens')
-        .leftJoin('enhanced_token_metrics', 'tokens.address', 'enhanced_token_metrics.token_address')
-        .whereNull('enhanced_token_metrics.token_address')
-        .orWhere('enhanced_token_metrics.market_cap', 0)
-        .select('tokens.address')
-        .limit(100);
-
-      logger.info(`Found ${tokensWithoutMetrics.length} tokens without market data`);
-
-      for (const token of tokensWithoutMetrics) {
-        this.enrichmentQueue.add(token.address);
-      }
+      // Use category-based API router
+      const useFullAnalysis = task.category === 'AIM';
+      const analysis = await categoryAPIRouter.analyzeToken(
+        task.tokenAddress,
+        task.category,
+        useFullAnalysis
+      );
+      
+      // Emit enrichment event
+      this.emit('tokenEnriched', {
+        address: task.tokenAddress,
+        category: task.category,
+        marketCap: analysis.marketCap,
+        price: (analysis as any).price || 0,
+        liquidity: analysis.liquidity,
+        volume24h: analysis.volume24h,
+        analysisType: analysis.analysisType,
+      });
+      
+      return {
+        tokenAddress: task.tokenAddress,
+        success: true,
+        marketCap: analysis.marketCap,
+        duration: Date.now() - startTime,
+        apisUsed: analysis.apisUsed,
+      };
     } catch (error) {
-      logger.error('Error finding tokens without metrics:', error);
+      logger.error(`Enrichment failed for ${task.tokenAddress}:`, error);
+      
+      return {
+        tokenAddress: task.tokenAddress,
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        duration: Date.now() - startTime,
+        apisUsed: [],
+      };
     }
   }
 
-  private async getTokenInfo(tokenAddress: string): Promise<any> {
-    return db('tokens')
-      .where('address', tokenAddress)
+  /**
+   * Monitor for tokens that should be upgraded to HIGH priority
+   */
+  private startAimUpgradeMonitoring(): void {
+    setInterval(async () => {
+      try {
+        // Find HIGH tokens approaching AIM threshold
+        const candidates = await db('tokens')
+          .join('enhanced_token_metrics', 'tokens.address', 'enhanced_token_metrics.token_address')
+          .where('tokens.category', 'HIGH')
+          .where('enhanced_token_metrics.market_cap', '>', 30000) // Close to $35k
+          .select('tokens.address', 'tokens.symbol', 'enhanced_token_metrics.market_cap');
+        
+        for (const candidate of candidates) {
+          logger.info(
+            `🎯 ${candidate.symbol} approaching AIM zone: ${candidate.market_cap} (${
+              ((candidate.market_cap / 35000) * 100).toFixed(1)
+            }% to AIM)`
+          );
+        }
+      } catch (error) {
+        logger.error('Error in AIM upgrade monitoring:', error);
+      }
+    }, 60000); // Check every minute
+  }
+
+  /**
+   * Get enrichment statistics
+   */
+  async getStats(): Promise<any> {
+    const scanStats = scanScheduler.getStats();
+    
+    // Get tokens by last update time
+    const staleTokens = await db('tokens')
+      .whereNotIn('category', ['BIN', 'ARCHIVE'])
+      .where('updated_at', '<', new Date(Date.now() - 30 * 60 * 1000)) // 30 minutes
+      .count('* as count')
       .first();
-  }
-
-  private calculateGraduationDistance(marketCap: number): number {
-    const graduationThreshold = 69000; // $69K
-    if (marketCap >= graduationThreshold) return 1.0;
-    if (marketCap <= 0) return 0.0;
-    return marketCap / graduationThreshold;
-  }
-
-  getStats() {
+    
     return {
+      scanScheduler: scanStats,
+      staleTokens: Number(staleTokens?.count) || 0,
       isRunning: this.isRunning,
-      queueSize: this.enrichmentQueue.size
     };
   }
 }
+
+// Export singleton instance
+export const tokenEnrichmentService = new TokenEnrichmentService();

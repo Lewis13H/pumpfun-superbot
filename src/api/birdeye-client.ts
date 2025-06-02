@@ -3,7 +3,7 @@ import { BaseAPIClient } from './base-api-client';
 
 export interface BirdeyeTokenData {
   address: string;
-  price: number;
+  current_price: number;
   marketCap: number;
   volume24h: number;
   priceChange24h: number;
@@ -30,7 +30,7 @@ export class BirdeyeClient extends BaseAPIClient {
 
     return {
       address: tokenAddress,
-      price: data.price || 0,
+      current_price: data.price || 0,
       marketCap: data.market_cap || 0,
       volume24h: data.volume_24h || 0,
       priceChange24h: data.price_change_24h || 0,

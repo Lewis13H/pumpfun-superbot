@@ -9,7 +9,7 @@ export interface MarketMetrics {
   timestamp: Date;
   
   // Price metrics
-  price: number;
+  current_price: number;
   priceChange1m?: number;
   priceChange5m?: number;
   priceChange15m?: number;
@@ -69,7 +69,7 @@ export interface PriceAlert {
 
 export class MarketMetricsAnalyzer extends EventEmitter {
   private analysisIntervals: Map<string, NodeJS.Timeout> = new Map();
-  private priceHistory: Map<string, Array<{price: number, timestamp: number}>> = new Map();
+  private priceHistory: Map<string, Array<{current_price: number, timestamp: number}>> = new Map();
   private volumeHistory: Map<string, Array<{volume: number, timestamp: number}>> = new Map();
   private isRunning: boolean = false;
   
@@ -233,7 +233,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
       
       return {
         source: 'dexscreener',
-        price: parseFloat(pair.priceUsd || '0'),
+        current_price: parseFloat(pair.priceUsd || '0'),
         volume24h: parseFloat(pair.volume?.h24 || '0'),
         volume1h: parseFloat(pair.volume?.h1 || '0'),
         priceChange24h: parseFloat(pair.priceChange?.h24 || '0') / 100,
@@ -271,7 +271,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
       
       return {
         source: 'birdeye',
-        price: data.data?.value || 0,
+        current_price: data.data?.value || 0,
         priceChange24h: data.data?.priceChange24h || 0,
         timestamp: Date.now(),
       };
@@ -314,7 +314,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
 
   private mergeMarketData(dataSources: any[]): any {
     const merged = {
-      price: 0,
+      current_price: 0,
       volume24h: 0,
       volume1h: 0,
       priceChange24h: 0,
@@ -362,7 +362,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     const metrics: MarketMetrics = {
       tokenAddress,
       timestamp: new Date(),
-      price: marketData.price,
+      current_price: marketData.price,
       priceChange1h: marketData.priceChange1h,
       priceChange24h: marketData.priceChange24h,
       volume1h: marketData.volume1h,
@@ -397,7 +397,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     return metrics;
   }
 
-  private updatePriceHistory(tokenAddress: string, price: number): void {
+  private updatePriceHistory(tokenAddress: string, current_price: number): void {
     if (!this.priceHistory.has(tokenAddress)) {
       this.priceHistory.set(tokenAddress, []);
     }
@@ -425,7 +425,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     }
   }
 
-  private calculateVolatility(priceHistory: Array<{price: number, timestamp: number}>): number {
+  private calculateVolatility(priceHistory: Array<{current_price: number, timestamp: number}>): number {
     if (priceHistory.length < 2) return 0;
 
     const prices = priceHistory.map(h => h.price);
@@ -446,7 +446,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
   }
 
   private calculateManipulationScore(
-    priceHistory: Array<{price: number, timestamp: number}>,
+    priceHistory: Array<{current_price: number, timestamp: number}>,
     volumeHistory: Array<{volume: number, timestamp: number}>,
     marketData: any
   ): number {
@@ -510,7 +510,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
   }
 
   private calculatePumpDumpScore(
-    priceHistory: Array<{price: number, timestamp: number}>,
+    priceHistory: Array<{current_price: number, timestamp: number}>,
     volumeHistory: Array<{volume: number, timestamp: number}>
   ): number {
     if (priceHistory.length < 5 || volumeHistory.length < 5) return 0;
@@ -541,7 +541,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     return Math.min(1, score);
   }
 
-  private determineTrendDirection(priceHistory: Array<{price: number, timestamp: number}>): 'UP' | 'DOWN' | 'SIDEWAYS' {
+  private determineTrendDirection(priceHistory: Array<{current_price: number, timestamp: number}>): 'UP' | 'DOWN' | 'SIDEWAYS' {
     if (priceHistory.length < 5) return 'SIDEWAYS';
 
     const prices = priceHistory.map(h => h.price);
@@ -558,7 +558,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     return 'SIDEWAYS';
   }
 
-  private calculateTrendStrength(priceHistory: Array<{price: number, timestamp: number}>): number {
+  private calculateTrendStrength(priceHistory: Array<{current_price: number, timestamp: number}>): number {
     if (priceHistory.length < 5) return 0;
 
     const prices = priceHistory.map(h => h.price);
@@ -578,7 +578,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     return Math.min(1, (trendStrength / consistentMoves) * (consistentMoves / prices.length));
   }
 
-  private calculateSupportLevel(priceHistory: Array<{price: number, timestamp: number}>): number | undefined {
+  private calculateSupportLevel(priceHistory: Array<{current_price: number, timestamp: number}>): number | undefined {
     if (priceHistory.length < 10) return undefined;
 
     const prices = priceHistory.map(h => h.price);
@@ -589,7 +589,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     return sortedPrices[index];
   }
 
-  private calculateResistanceLevel(priceHistory: Array<{price: number, timestamp: number}>): number | undefined {
+  private calculateResistanceLevel(priceHistory: Array<{current_price: number, timestamp: number}>): number | undefined {
     if (priceHistory.length < 10) return undefined;
 
     const prices = priceHistory.map(h => h.price);
@@ -712,7 +712,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
       await db('market_metrics_history').insert({
         token_address: metrics.tokenAddress,
         timestamp: metrics.timestamp,
-        price: metrics.price,
+        current_price: metrics.price,
         price_change_1m: metrics.priceChange1m,
         price_change_5m: metrics.priceChange5m,
         price_change_15m: metrics.priceChange15m,
@@ -863,7 +863,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
       return {
         tokenAddress: latest.token_address,
         timestamp: latest.timestamp,
-        price: parseFloat(latest.price || '0'),
+        current_price: parseFloat(latest.price || '0'),
         priceChange1h: parseFloat(latest.price_change_1h || '0'),
         priceChange24h: parseFloat(latest.price_change_24h || '0'),
         volume1h: parseFloat(latest.volume_1h || '0'),
@@ -917,3 +917,4 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     };
   }
 }
+

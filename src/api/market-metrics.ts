@@ -132,7 +132,7 @@ marketMetricsRouter.get('/top-tokens', async (req, res) => {
       filters: { tier, sort, timeframe, limit },
       tokens: tokens.map(token => ({
         ...token,
-        price: parseFloat(token.price || '0'),
+        current_price: parseFloat(token.price || '0'),
         price_change_24h: parseFloat(token.price_change_24h || '0'),
         volume_24h: parseFloat(token.volume_24h || '0'),
         liquidity_usd: parseFloat(token.liquidity_usd || '0'),
@@ -309,7 +309,7 @@ marketMetricsRouter.get('/token/:address/metrics', async (req, res) => {
       token_address: address,
       metrics: {
         ...metrics,
-        price: parseFloat(metrics.price?.toString() || '0'),
+        current_price: parseFloat(metrics.price?.toString() || '0'),
         volume_24h: parseFloat(metrics.volume24h?.toString() || '0'),
         liquidity_usd: parseFloat(metrics.liquidityUsd?.toString() || '0'),
         market_cap: parseFloat(metrics.marketCap?.toString() || '0'),
@@ -418,7 +418,7 @@ marketMetricsRouter.get('/token/:address/history', async (req, res) => {
       data_points: history.length,
       history: history.map(point => ({
         timestamp: point.timestamp,
-        price: parseFloat(point.price || '0'),
+        current_price: parseFloat(point.price || '0'),
         volume_1h: parseFloat(point.volume_1h || '0'),
         volume_24h: parseFloat(point.volume_24h || '0'),
         liquidity_usd: parseFloat(point.liquidity_usd || '0'),

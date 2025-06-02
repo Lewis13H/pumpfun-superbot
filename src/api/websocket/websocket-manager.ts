@@ -68,7 +68,7 @@ export class WebSocketManager {
         createdAt: token.createdAt,
         discoveredAt: new Date(),
         marketCap: 0,
-        price: 0,
+        current_price: 0,
         priceChange24h: 0,
         volume24h: 0,
         liquidity: 0,
@@ -93,7 +93,7 @@ export class WebSocketManager {
         this.broadcast('token-update', {
           address: updatedToken.address,
           marketCap: Number(updatedToken.market_cap || 0),
-          price: Number(updatedToken.price || 0),
+          current_price: Number(updatedToken.price || 0),
           priceChange24h: Number(updatedToken.price_change_24h || 0),
           volume24h: Number(updatedToken.volume_24h || 0),
           liquidity: Number(updatedToken.liquidity || 0),

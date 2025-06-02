@@ -49,7 +49,7 @@ export class SolPriceService extends EventEmitter {
     // Set up periodic updates
     this.updateInterval = setInterval(() => {
       this.updatePrice().catch(error => {
-        logger.error('Failed to update SOL price:', error);
+        logger.error('Failed to update SOL current_price:', error);
       });
     }, this.UPDATE_INTERVAL);
 
@@ -141,7 +141,7 @@ export class SolPriceService extends EventEmitter {
     if (priceChange > 1) {
       logger.info(`SOL price updated: $${previousPrice.toFixed(2)} → $${priceData.priceUSD.toFixed(2)} (${priceChange > 0 ? '+' : ''}${((priceData.priceUSD - previousPrice) / previousPrice * 100).toFixed(2)}%)`);
     } else {
-      logger.debug(`SOL price: $${priceData.priceUSD.toFixed(2)}`);
+      logger.debug(`SOL current_price: $${priceData.priceUSD.toFixed(2)}`);
     }
   }
 
