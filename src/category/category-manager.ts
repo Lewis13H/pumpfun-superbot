@@ -75,7 +75,7 @@ export class CategoryManager extends EventEmitter {
   }
   
   /**
-   * Handle state transitions
+   * Handle state transitions with proper transaction management
    */
   private async handleStateTransition(
     tokenAddress: string,
@@ -94,9 +94,12 @@ export class CategoryManager extends EventEmitter {
     
     logger.info(`State transition: ${tokenAddress} ${fromCategory} → ${toCategory}`);
     
+    // Use a transaction to ensure all operations complete atomically
+    const trx = await db.transaction();
+    
     try {
       // Update database
-      await db('tokens')
+      await trx('tokens')
         .where('address', tokenAddress)
         .update({
           category: toCategory,
@@ -106,7 +109,7 @@ export class CategoryManager extends EventEmitter {
         });
       
       // Record transition
-      await db('category_transitions').insert({
+      await trx('category_transitions').insert({
         token_address: tokenAddress,
         from_category: fromCategory,
         to_category: toCategory,
@@ -117,7 +120,10 @@ export class CategoryManager extends EventEmitter {
         },
       });
       
-      // Emit event
+      // Commit transaction
+      await trx.commit();
+      
+      // Emit event (after transaction commits successfully)
       this.emit('categoryChange', {
         tokenAddress,
         fromCategory,
@@ -137,7 +143,10 @@ export class CategoryManager extends EventEmitter {
         this.stateCache.delete(tokenAddress);
       }
     } catch (error) {
+      // Rollback transaction on error
+      await trx.rollback();
       logger.error(`Error handling state transition for ${tokenAddress}:`, error);
+      // Don't throw - we don't want to crash the state machine
     }
   }
   
@@ -187,17 +196,21 @@ export class CategoryManager extends EventEmitter {
   }
   
   /**
-   * Handle AIM entry
+   * Handle AIM entry with separate connection
    */
   private async handleAimEntry(tokenAddress: string): Promise<void> {
-    await db('tokens')
-      .where('address', tokenAddress)
-      .increment('aim_attempts', 1);
-    
-    this.emit('aimEntry', {
-      tokenAddress,
-      timestamp: new Date(),
-    });
+    try {
+      await db('tokens')
+        .where('address', tokenAddress)
+        .increment('aim_attempts', 1);
+      
+      this.emit('aimEntry', {
+        tokenAddress,
+        timestamp: new Date(),
+      });
+    } catch (error) {
+      logger.error(`Error handling AIM entry for ${tokenAddress}:`, error);
+    }
   }
   
   /**
@@ -236,11 +249,21 @@ export class CategoryManager extends EventEmitter {
   }
   
   /**
-   * Bulk update multiple tokens
+   * Bulk update multiple tokens with batching
    */
   async bulkUpdateMarketCaps(updates: Array<{ address: string; marketCap: number }>): Promise<void> {
-    for (const update of updates) {
-      await this.updateTokenMarketCap(update.address, update.marketCap);
+    // Process in batches to avoid overwhelming the system
+    const batchSize = 10;
+    for (let i = 0; i < updates.length; i += batchSize) {
+      const batch = updates.slice(i, i + batchSize);
+      await Promise.all(
+        batch.map(update => this.updateTokenMarketCap(update.address, update.marketCap))
+      );
+      
+      // Small delay between batches
+      if (i + batchSize < updates.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
   }
   
@@ -271,7 +294,7 @@ export class CategoryManager extends EventEmitter {
   }
   
   /**
-   * Shutdown
+   * Shutdown gracefully
    */
   async shutdown(): Promise<void> {
     // Stop all state machines
@@ -288,5 +311,3 @@ export class CategoryManager extends EventEmitter {
 
 // Export singleton instance
 export const categoryManager = new CategoryManager();
-
-

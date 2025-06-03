@@ -23,7 +23,7 @@ async function monitorBuySignals() {
     activeSignals.forEach(signal => {
       console.log(`\n${signal.symbol}:`);
       console.log(`  Address: ${signal.tokenAddress}`);
-      console.log(`  Market Cap: ${signal.evaluation.marketCap}`);
+      console.log(`  Market Cap: $${signal.evaluation.marketCap}`);
       console.log(`  Position: ${signal.position.finalPosition} SOL`);
       console.log(`  Confidence: ${(signal.evaluation.confidence * 100).toFixed(1)}%`);
       console.log(`  Reasons: ${signal.position.reasoning.join(', ')}`);
@@ -42,14 +42,14 @@ async function monitorBuySignals() {
   const recentEvals = await buySignalEvaluator.getEvaluationHistory(10);
   console.log('\nRecent Evaluations:');
   
-  for (const eval of recentEvals) {
+  for (const evaluation of recentEvals) {
     const token = await db('tokens')
-      .where('address', eval.token_address)
+      .where('address', evaluation.token_address)
       .first();
     
-    console.log(`  ${token?.symbol || eval.token_address.slice(0, 8)}: ${
-      eval.passed ? '✅ PASS' : '❌ FAIL'
-    } (MC: ${eval.market_cap})`);
+    console.log(`  ${token?.symbol || evaluation.token_address.slice(0, 8)}: ${
+      evaluation.passed ? '✅ PASS' : '❌ FAIL'
+    } (MC: $${evaluation.market_cap})`);
   }
 }
 

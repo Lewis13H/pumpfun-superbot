@@ -720,7 +720,7 @@ export class EnhancedTokenAnalyzer extends EventEmitter {
           ...(result.marketMetrics?.marketCap && { market_cap: result.marketMetrics.marketCap }),
           ...(result.marketMetrics?.liquidityUsd && { liquidity: result.marketMetrics.liquidityUsd }),
           ...(result.marketMetrics?.volume24h && { volume_24h: result.marketMetrics.volume24h }),
-          ...(result.marketMetrics?.price && { current_price: result.marketMetrics.price }),
+          ...(result.marketMetrics?.current_price && { current_price: result.marketMetrics.current_price }),
         });
     } catch (error) {
       logger.error('Failed to update token record:', error);
@@ -783,4 +783,6 @@ export class EnhancedTokenAnalyzer extends EventEmitter {
     };
   }
 }
+
+
 

@@ -203,44 +203,19 @@ export class CategoryAPIRouter {
     // SolSniffer (expensive - AIM only)
     if (solsnifferData.status === 'fulfilled' && solsnifferData.value) {
       const data = solsnifferData.value;
-      
-      // Use the ACTUAL safety score from SolSniffer (not calculated from rugPullRisk)
-      securityData.solsnifferScore = data.score;
-      
-      // Store ALL security data
+      securityData.solsnifferScore = Math.round((1 - data.rugPullRisk) * 100);
       securityData.securityFlags = {
         rugPullRisk: data.rugPullRisk,
-        honeypot: data.honeypot,
+        honeypot: (data as any).honeypot || false,
         liquidityLocked: data.liquidityLocked,
-        lpBurned: data.lpBurned,
         mintDisabled: data.mintAuthorityRenounced,
-        freezeDisabled: data.freezeAuthorityRenounced,
-        topHolderPercentage: data.topHolderPercentage,
-        riskLevel: data.riskLevel,
-        warnings: data.warnings,
-        highRiskCount: data.highRiskCount,
-        mediumRiskCount: data.mediumRiskCount,
-        lowRiskCount: data.lowRiskCount,
-        specificRisks: data.specificRisks,
-        rawIndicatorData: data.rawIndicatorData,
-        tokenInfo: data.tokenInfo
+        freezeDisabled: (data as any).freezeAuthorityRenounced || false,
       };
-      
       apisUsed.push('solsniffer');
       costIncurred += 0.01;
       
-      // Track SolSniffer usage with score
+      // Track SolSniffer usage
       await this.trackSolSnifferUsage(tokenAddress, securityData.solsnifferScore);
-      
-      logger.info(`[SOLSNIFFER] Score for ${tokenAddress}: ${securityData.solsnifferScore}`, {
-        riskLevel: data.riskLevel,
-        warnings: data.warnings.length,
-        risks: {
-          high: data.highRiskCount,
-          medium: data.mediumRiskCount,
-          low: data.lowRiskCount
-        }
-      });
     }
     
     // Top 10 concentration
@@ -248,13 +223,7 @@ export class CategoryAPIRouter {
       securityData.top10Percent = holderData.value || 0;
     }
     
-    // Update database with full data including ALL security information
-    logger.info(`[DEBUG] Security data before update:`, {
-      solsnifferScore: securityData.solsnifferScore,
-      hasSecurityFlags: !!securityData.securityFlags,
-      flagKeys: Object.keys(securityData.securityFlags)
-    });
-    
+    // Update database with full data
     await this.updateTokenData(tokenAddress, marketData, category, securityData);
     
     // Track costs
@@ -292,9 +261,7 @@ export class CategoryAPIRouter {
     return 0;
   }
   
-  /**
-   * Update token data in database
-   */
+   //date token data in database
   private async updateTokenData(
     tokenAddress: string,
     marketData: any,
@@ -303,8 +270,14 @@ export class CategoryAPIRouter {
   ): Promise<void> {
     try {
       // Log incoming data
-      logger.info(`[DB] Updating token ${tokenAddress}`);
-      
+      logger.info(`[DEBUG] updateTokenData called for ${tokenAddress}`);
+      logger.info(`[DEBUG] Market data:`, {
+        marketCap: marketData.marketCap,
+        price: marketData.price,
+        liquidity: marketData.liquidity,
+        volume24h: marketData.volume24h
+      });
+
       const updateData: any = {
         market_cap: marketData.marketCap || 0,
         current_price: marketData.price || 0,
@@ -314,45 +287,30 @@ export class CategoryAPIRouter {
         updated_at: new Date(),
       };
 
-      if (securityData && securityData.solsnifferScore !== undefined) {
-        // Save the SolSniffer score (0-100 where 100 is safest)
+      logger.info(`[DEBUG] Update data prepared:`, updateData);
+
+      if (securityData) {
         updateData.solsniffer_score = securityData.solsnifferScore;
         updateData.solsniffer_checked_at = new Date();
-        updateData.top_10_percent = securityData.top10Percent || 0;
-        
-        // Save ALL security data in JSONB field
-        if (securityData.securityFlags) {
-          updateData.security_data = JSON.stringify(securityData.securityFlags);
-        }
-        
-        logger.info(`[DB] Saving SolSniffer data for ${tokenAddress}:`, {
-          score: updateData.solsniffer_score,
-          hasSecurityData: !!updateData.security_data
-        });
+        updateData.top_10_percent = securityData.top10Percent;
       }
 
-      // Execute update
+    // Execute update
       const result = await db('tokens')
         .where('address', tokenAddress)
         .update(updateData);
 
-      logger.info(`[DB] Updated ${result} rows for ${tokenAddress}`);
+      logger.info(`[DEBUG] Database update result: ${result} rows affected`);
 
-      // Verify update if security data was included
-      if (securityData) {
-        const updated = await db('tokens')
-          .where('address', tokenAddress)
-          .select('solsniffer_score', 'solsniffer_checked_at', 'security_data')
-          .first();
+    // Verify update
+      const updated = await db('tokens')
+        .where('address', tokenAddress)
+        .select('market_cap', 'liquidity', 'volume_24h', 'updated_at')
+        .first();
 
-        logger.info(`[DB] Verified SolSniffer data:`, {
-          score: updated.solsniffer_score,
-          hasSecurityData: !!updated.security_data,
-          checkedAt: updated.solsniffer_checked_at
-        });
-      }
+      logger.info(`[DEBUG] Verified database values:`, updated);
 
-      // Update enhanced metrics
+    // Update enhanced metrics
       await db('enhanced_token_metrics')
         .insert({
           token_address: tokenAddress,
@@ -366,7 +324,7 @@ export class CategoryAPIRouter {
         .merge();
 
     } catch (error) {
-      logger.error(`[DB] Error updating token ${tokenAddress}:`, error);
+      logger.error(`[DEBUG] Error in updateTokenData for ${tokenAddress}:`, error);
       throw error;
     }
   }

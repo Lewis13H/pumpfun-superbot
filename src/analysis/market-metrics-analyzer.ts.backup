@@ -403,7 +403,7 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     }
 
     const history = this.priceHistory.get(tokenAddress)!;
-    history.push({ current_price: current_price, timestamp: Date.now() });
+    history.push({ current_price: metrics.current_price, timestamp: Date.now() });
 
     // Keep only last 60 minutes of data (assuming 1-minute intervals)
     if (history.length > 60) {

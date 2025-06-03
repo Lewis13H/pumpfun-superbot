@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { logger } from '../utils/logger';
 
 export interface APICallRecord {
@@ -25,7 +25,7 @@ export abstract class BaseAPIClient {
     
     this.client = axios.create({
       baseURL,
-      timeout: 10000,
+      timeout: 30000, // Increased to 30 seconds
       headers: {
         'User-Agent': 'Solana-Token-Discovery/1.0',
         ...(apiKey && { 'Authorization': `Bearer ${apiKey}` })
@@ -79,6 +79,16 @@ export abstract class BaseAPIClient {
         throw new Error(`Budget limit reached for ${this.serviceName}`);
       }
 
+      // DEBUG: Log request details for solsniffer
+      if (this.serviceName === 'solsniffer') {
+        console.log('[DEBUG] Solsniffer request:', {
+          url: endpoint,
+          baseURL: this.baseURL,
+          headers: this.client.defaults.headers,
+          apiKey: this.apiKey ? 'Set' : 'Not set'
+        });
+      }
+
       const response = await this.client.request<T>({
         url: endpoint,
         ...options
@@ -91,6 +101,15 @@ export abstract class BaseAPIClient {
         endpoint,
         error: error instanceof Error ? error.message : 'Unknown error'
       });
+
+      // Add more detailed error logging
+      if (axios.isAxiosError(error) && error.response) {
+        logger.error('Response error details:', {
+          status: error.response.status,
+          data: error.response.data,
+          headers: error.response.headers
+        });
+      }
       throw error;
     }
   }
@@ -207,3 +226,5 @@ class CostTracker {
     return Math.max(0, limit - this.getDailyCost());
   }
 }
+
+

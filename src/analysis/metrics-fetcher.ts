@@ -97,7 +97,7 @@ export class MetricsFetcher {
   private extractBirdeyeMetrics(data: any): TokenMetrics {
     const tokenData = data?.data || data;
     return {
-      current_price: tokenData.price || tokenData.v,
+      // current_price already set above
       marketCap: tokenData.mc,
       volume24h: tokenData.v24hUSD,
       liquidity: tokenData.liquidity,
@@ -136,3 +136,4 @@ export class MetricsFetcher {
     this.cache.set(key, { data, timestamp: Date.now() });
   }
 }
+

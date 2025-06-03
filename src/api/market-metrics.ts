@@ -309,7 +309,7 @@ marketMetricsRouter.get('/token/:address/metrics', async (req, res) => {
       token_address: address,
       metrics: {
         ...metrics,
-        current_price: parseFloat(metrics.price?.toString() || '0'),
+        current_price: parseFloat(metrics.current_price?.toString() || '0'),
         volume_24h: parseFloat(metrics.volume24h?.toString() || '0'),
         liquidity_usd: parseFloat(metrics.liquidityUsd?.toString() || '0'),
         market_cap: parseFloat(metrics.marketCap?.toString() || '0'),
@@ -534,3 +534,4 @@ marketMetricsRouter.get('/stats', async (req, res) => {
 });
 
 export default marketMetricsRouter;
+

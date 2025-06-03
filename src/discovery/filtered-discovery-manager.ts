@@ -179,23 +179,39 @@ export class FilteredDiscoveryManager extends EventEmitter {
           sanitizedToken.name = pair.baseToken.name;
         }
       }
-
       // For PumpFun tokens, use initial data if DexScreener has nothing
       if (sanitizedToken.platform === 'pumpfun' && marketData.marketCap === 0) {
         const pumpfunData = sanitizedToken.metadata as any;
-        
-        if (pumpfunData?.vSolInBondingCurve && pumpfunData?.vTokensInBondingCurve) {
-          const solPrice = 180; // Could be made dynamic
-          const initialPrice = pumpfunData.vSolInBondingCurve / (pumpfunData.vTokensInBondingCurve / 1_000_000);
-          marketData = {
-            marketCap: 4000, // PumpFun starts at $4k market cap
-            price: initialPrice * solPrice / 1_000_000_000,
-            liquidity: pumpfunData.vSolInBondingCurve * solPrice,
-            volume24h: 0
-          };
-          logger.info(`📊 Using PumpFun initial data: MC=$${marketData.marketCap}`);
-        }
+  
+      // First check if market cap was already calculated and passed in metadata
+      if (pumpfunData?.marketCap) {
+        marketData.marketCap = pumpfunData.marketCap;
+        logger.info(`📊 Using PumpFun calculated market cap: MC=$${marketData.marketCap}`);
+      } else if (pumpfunData?.marketCapSol) {
+      // Calculate from SOL market cap if available
+       const solPrice = 180; // Could use solPriceService.getCurrentPrice()
+       marketData.marketCap = pumpfunData.marketCapSol * solPrice;
+       logger.info(`📊 Calculated market cap from SOL: MC=$${marketData.marketCap}`);
+      } else if (pumpfunData?.vSolInBondingCurve && pumpfunData?.vTokensInBondingCurve) {
+      // Fallback calculation from reserves
+      const solPrice = 180;
+      const initialPrice = pumpfunData.vSolInBondingCurve / (pumpfunData.vTokensInBondingCurve / 1_000_000);
+      marketData.marketCap = 4000; // Default if no other data
+      logger.info(`📊 Using default PumpFun market cap: MC=$${marketData.marketCap}`);
       }
+  
+      // Set other market data if available
+      if (pumpfunData?.vSolInBondingCurve) {
+        const solPrice = 180;
+        marketData.liquidity = pumpfunData.vSolInBondingCurve * solPrice;
+      }
+  
+      // Set price if available
+      if (pumpfunData?.initialPrice) {
+        marketData.price = pumpfunData.initialPrice;
+      }
+    }
+      
 
       // Determine initial category based on market cap
       const initialCategory = getCategoryFromMarketCap(marketData.marketCap);

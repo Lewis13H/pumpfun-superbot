@@ -1,8 +1,0 @@
-// Add this import at the top with other imports:
-import { getCategoryFromMarketCap } from '../config/category-utils';
-
-// Then add this right after calculating marketData but BEFORE the database insert:
-
-// Determine initial category based on market cap
-const initialCategory = getCategoryFromMarketCap(marketData.marketCap);
-logger.info(`Token ${sanitizedToken.symbol} assigned to category: ${initialCategory} (MC: $${marketData.marketCap})`);

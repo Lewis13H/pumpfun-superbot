@@ -491,6 +491,10 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
       return;
     }
 
+    // Calculate market cap in USD using dynamic SOL price
+    const solPriceUSD = solPriceService.getCurrentPrice();
+    const marketCapUSD = (tokenData.marketCapSol || 0) * solPriceUSD;
+
     const enhancedToken: EnhancedTokenDiscovery = {
       address: tokenData.mint,
       symbol: tokenData.symbol || 'UNKNOWN',
@@ -511,6 +515,7 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
         virtualSolReserves: tokenData.vSolInBondingCurve,
         virtualTokenReserves: tokenData.vTokensInBondingCurve,
         marketCapSol: tokenData.marketCapSol,
+        marketCap: marketCapUSD,  // <-- FIX: Add the calculated USD market cap here
         pool: tokenData.pool,
       },
     };
@@ -522,10 +527,6 @@ export class EnhancedPumpFunMonitor extends BaseMonitor {
       enhancedToken.virtualSolReserves = tokenData.vSolInBondingCurve;
       enhancedToken.virtualTokenReserves = tokenData.vTokensInBondingCurve;
     }
-
-    // Calculate market cap in USD using dynamic SOL price
-    const solPriceUSD = solPriceService.getCurrentPrice();
-    const marketCapUSD = (tokenData.marketCapSol || 0) * solPriceUSD;
     
     logger.info(`New PumpFun token: ${enhancedToken.symbol} (${enhancedToken.name}) - Market Cap: $${marketCapUSD.toFixed(0)}`);
     

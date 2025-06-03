@@ -89,7 +89,11 @@ export class BuySignalEvaluator extends EventEmitter {
       evaluation.confidence = this.calculateConfidence(evaluation);
       
       // Log evaluation
-      logger.info(`Buy evaluation for ${token.symbol}: ${evaluation.passed ? 'PASSED' : 'FAILED'}`);
+      logger.info(`Buy evaluation for ${token.symbol}: ${evaluation.passed ? 'PASSED' : 'FAILED'}`, {
+        criteria: evaluation.criteria,
+        score: evaluation.solsnifferScore
+      });
+      
       if (!evaluation.passed) {
         logger.info(`Failure reasons: ${evaluation.failureReasons.join(', ')}`);
       }
@@ -109,12 +113,25 @@ export class BuySignalEvaluator extends EventEmitter {
   }
   
   /**
-   * Get token data
+   * Get token data including security data
    */
   private async getTokenData(tokenAddress: string): Promise<any> {
-    return await db('tokens')
+    const token = await db('tokens')
       .where('address', tokenAddress)
       .first();
+      
+    // Parse security_data if it exists
+    if (token && token.security_data) {
+      try {
+        token.parsedSecurityData = typeof token.security_data === 'string' 
+          ? JSON.parse(token.security_data)
+          : token.security_data;
+      } catch (e) {
+        logger.warn(`Failed to parse security_data for ${tokenAddress}`);
+      }
+    }
+    
+    return token;
   }
   
   /**
@@ -191,34 +208,64 @@ export class BuySignalEvaluator extends EventEmitter {
   private async evaluateSolSniffer(evaluation: BuyEvaluation, token: any): Promise<void> {
     // Check if we have recent SolSniffer data
     if (!token.solsniffer_checked_at) {
+      evaluation.criteria.solsniffer = false;
       evaluation.failureReasons.push('No SolSniffer data available');
       return;
     }
     
     const hoursSinceCheck = (Date.now() - new Date(token.solsniffer_checked_at).getTime()) / (1000 * 60 * 60);
     if (hoursSinceCheck > 1) {
+      evaluation.criteria.solsniffer = false;
       evaluation.failureReasons.push('SolSniffer data is stale (>1 hour old)');
       return;
     }
     
-    const { min, blacklist } = this.criteria.solsniffer;
+    // Get the score (0-100 where 100 is safest)
+    const score = token.solsniffer_score;
     
-    // Check blacklist
-    if (blacklist.includes(evaluation.solsnifferScore)) {
+    if (score === null || score === undefined) {
       evaluation.criteria.solsniffer = false;
-      evaluation.failureReasons.push(
-        `SolSniffer score ${evaluation.solsnifferScore} is blacklisted`
-      );
+      evaluation.failureReasons.push('SolSniffer score is null');
       return;
     }
     
-    // Check minimum
-    evaluation.criteria.solsniffer = evaluation.solsnifferScore > min;
+    // Update the evaluation with the actual score
+    evaluation.solsnifferScore = score;
+    
+    const { min, blacklist } = this.criteria.solsniffer;
+    
+    // Check blacklist (score of exactly 90 is blacklisted)
+    if (blacklist.includes(score)) {
+      evaluation.criteria.solsniffer = false;
+      evaluation.failureReasons.push(
+        `SolSniffer score ${score} is blacklisted`
+      );
+      logger.info(`[BUY_SIGNAL] SolSniffer score ${score} is BLACKLISTED`);
+      return;
+    }
+    
+    // Check minimum (score must be > 60)
+    evaluation.criteria.solsniffer = score > min;
     
     if (!evaluation.criteria.solsniffer) {
       evaluation.failureReasons.push(
-        `SolSniffer score ${evaluation.solsnifferScore} below minimum ${min}`
+        `SolSniffer score ${score} below minimum ${min}`
       );
+    } else {
+      logger.info(`[BUY_SIGNAL] SolSniffer score ${score} PASSED (>${min} and ≠90)`);
+    }
+    
+    // Log additional security data if available
+    if (token.parsedSecurityData) {
+      logger.info(`[BUY_SIGNAL] Additional security data:`, {
+        riskLevel: token.parsedSecurityData.riskLevel,
+        warnings: token.parsedSecurityData.warnings?.length || 0,
+        risks: {
+          high: token.parsedSecurityData.highRiskCount || 0,
+          medium: token.parsedSecurityData.mediumRiskCount || 0,
+          low: token.parsedSecurityData.lowRiskCount || 0
+        }
+      });
     }
   }
   
@@ -250,8 +297,8 @@ export class BuySignalEvaluator extends EventEmitter {
       confidence += 0.1;
     }
     
-    // High SolSniffer score
-    if (evaluation.solsnifferScore > 80) {
+    // High SolSniffer score (but not 90)
+    if (evaluation.solsnifferScore > 80 && evaluation.solsnifferScore !== 90) {
       confidence += 0.1;
     }
     
