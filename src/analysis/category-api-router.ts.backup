@@ -319,7 +319,7 @@ export class CategoryAPIRouter {
       if (cachedToken?.solsniffer_score) {
         solsnifferPromise = Promise.resolve({
           score: cachedToken.solsniffer_score,
-          securityFlags: cachedToken.security_data || {},
+          securityFlags: cachedToken.security_data ? JSON.parse(cachedToken.security_data) : {},
           cached: true
         });
       } else {
