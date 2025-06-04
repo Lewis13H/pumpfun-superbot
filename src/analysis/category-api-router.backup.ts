@@ -80,68 +80,6 @@ export class CategoryAPIRouter {
   }
   
   /**
-   * Check if we should call SolSniffer based on basic criteria and cache
-   */
-  private async shouldCallSolSniffer(tokenAddress: string): Promise<boolean> {
-    // Check if disabled
-    if (process.env.DISABLE_SOLSNIFFER === 'true') {
-      logger.info(`[SOLSNIFFER] Disabled by environment variable`);
-      return false;
-    }
-    
-    // Get token to check basic criteria
-    const token = await db('tokens')
-      .where('address', tokenAddress)
-      .first();
-      
-    if (!token) return false;
-    
-    const criteria = categoryConfig.buySignalCriteria;
-    
-    // Don't call if basic criteria not met
-    if (token.market_cap < criteria.marketCap.min || 
-        token.market_cap > criteria.marketCap.max ||
-        token.liquidity < criteria.liquidity.min ||
-        (token.holders && token.holders < criteria.holders.min) ||
-        (token.top_10_percent && token.top_10_percent >= criteria.top10Concentration.max)) {
-      logger.info(`[SOLSNIFFER] Skipping ${token.symbol} - basic criteria not met:`, {
-        marketCap: `$${token.market_cap} (need $${criteria.marketCap.min}-$${criteria.marketCap.max})`,
-        liquidity: `$${token.liquidity} (need ≥$${criteria.liquidity.min})`,
-        holders: `${token.holders} (need ≥${criteria.holders.min})`,
-        top10: `${token.top_10_percent}% (need <${criteria.top10Concentration.max}%)`
-      });
-      return false;
-    }
-    
-    // Check cache (1 hour for good scores, 30 minutes for bad scores)
-    if (token.solsniffer_checked_at) {
-      const hoursSinceCheck = (Date.now() - new Date(token.solsniffer_checked_at).getTime()) / (1000 * 60 * 60);
-      const cacheHours = token.solsniffer_score > 60 && token.solsniffer_score !== 90 ? 1 : 0.5;
-      
-      if (hoursSinceCheck < cacheHours) {
-        logger.info(`[SOLSNIFFER] Using cache for ${token.symbol} - score: ${token.solsniffer_score} (${hoursSinceCheck.toFixed(1)}h old)`);
-        return false;
-      }
-    }
-    
-    // Check daily limit per token
-    const todaysCalls = await db('api_call_logs')
-      .where('service', 'solsniffer')
-      .where('token_address', tokenAddress)
-      .where('timestamp', '>', new Date(new Date().setHours(0,0,0,0)))
-      .count('* as count')
-      .first();
-      
-    if (Number(todaysCalls?.count) >= 10) { // Max 10 calls per token per day
-      logger.info(`[SOLSNIFFER] Daily limit reached for ${token.symbol}`);
-      return false;
-    }
-    
-    logger.info(`[SOLSNIFFER] Will check ${token.symbol} - all basic criteria met`);
-    return true;
-  }
-  
-  /**
    * Basic analysis - no expensive APIs
    */
   private async performBasicAnalysis(
@@ -284,7 +222,7 @@ export class CategoryAPIRouter {
   }
   
   /**
-   * Full analysis - all APIs including SolSniffer (conditional)
+   * Full analysis - all APIs including SolSniffer
    */
   private async performFullAnalysis(
     tokenAddress: string,
@@ -294,49 +232,19 @@ export class CategoryAPIRouter {
     const apisUsed: string[] = [];
     let costIncurred = 0;
     
-    // First, check if we need SolSniffer
-    const needsSolSniffer = await this.shouldCallSolSniffer(tokenAddress);
-    
-    // Build API calls array
-    const apiCalls: Promise<any>[] = [
-      this.dexscreener.getTokenPairs(tokenAddress),
-      this.birdeye.getTokenOverview(tokenAddress),
-      this.getTop10Concentration(tokenAddress),
-      this.raydium.getPoolInfo(tokenAddress)
-    ];
-    
-    // Handle SolSniffer conditionally
-    let solsnifferPromise: Promise<any>;
-    if (needsSolSniffer) {
-      solsnifferPromise = this.solsniffer.analyzeToken(tokenAddress);
-    } else {
-      // Get cached score if available
-      const cachedToken = await db('tokens')
-        .where('address', tokenAddress)
-        .select('solsniffer_score', 'security_data')
-        .first();
-      
-      if (cachedToken?.solsniffer_score) {
-        solsnifferPromise = Promise.resolve({
-          score: cachedToken.solsniffer_score,
-          securityFlags: cachedToken.security_data ? JSON.parse(cachedToken.security_data) : {},
-          cached: true
-        });
-      } else {
-        solsnifferPromise = Promise.reject(new Error('No SolSniffer data available'));
-      }
-    }
-    
-    // Execute all API calls
+    // Call all APIs including expensive ones
     const [
       dexData,
       birdeyeData,
+      solsnifferData,
       holderData,
-      raydiumData,
-      solsnifferData
+      raydiumData
     ] = await Promise.allSettled([
-      ...apiCalls,
-      solsnifferPromise
+      this.dexscreener.getTokenPairs(tokenAddress),
+      this.birdeye.getTokenOverview(tokenAddress),
+      this.solsniffer.analyzeToken(tokenAddress),
+      this.getTop10Concentration(tokenAddress),
+      this.raydium.getPoolInfo(tokenAddress)
     ]);
     
     // Parse results
@@ -409,56 +317,47 @@ export class CategoryAPIRouter {
       apisUsed.push('raydium');
     }
     
-    // SolSniffer (expensive - AIM only, conditional)
+    // SolSniffer (expensive - AIM only)
     if (solsnifferData.status === 'fulfilled' && solsnifferData.value) {
       const data = solsnifferData.value;
       
-      // Check if this is cached data
-      if (data.cached) {
-        securityData.solsnifferScore = data.score;
-        securityData.securityFlags = data.securityFlags || {};
-        logger.info(`[SOLSNIFFER] Using cached score for ${tokenAddress}: ${data.score}`);
-      } else {
-        // Fresh API call
-        securityData.solsnifferScore = data.score;
-        
-        // Store ALL security data
-        securityData.securityFlags = {
-          rugPullRisk: data.rugPullRisk,
-          honeypot: data.honeypot,
-          liquidityLocked: data.liquidityLocked,
-          lpBurned: data.lpBurned,
-          mintDisabled: data.mintAuthorityRenounced,
-          freezeDisabled: data.freezeAuthorityRenounced,
-          topHolderPercentage: data.topHolderPercentage,
-          riskLevel: data.riskLevel,
-          warnings: data.warnings,
-          highRiskCount: data.highRiskCount,
-          mediumRiskCount: data.mediumRiskCount,
-          lowRiskCount: data.lowRiskCount,
-          specificRisks: data.specificRisks,
-          rawIndicatorData: data.rawIndicatorData,
-          tokenInfo: data.tokenInfo
-        };
-        
-        apisUsed.push('solsniffer');
-        costIncurred += 0.01;
-        
-        // Track SolSniffer usage with score
-        await this.trackSolSnifferUsage(tokenAddress, securityData.solsnifferScore);
-        
-        logger.info(`[SOLSNIFFER] Fresh score for ${tokenAddress}: ${securityData.solsnifferScore}`, {
-          riskLevel: data.riskLevel,
-          warnings: data.warnings?.length || 0,
-          risks: {
-            high: data.highRiskCount || 0,
-            medium: data.mediumRiskCount || 0,
-            low: data.lowRiskCount || 0
-          }
-        });
-      }
-    } else if (solsnifferData.status === 'rejected') {
-      logger.info(`[SOLSNIFFER] No data available for ${tokenAddress}: ${solsnifferData.reason}`);
+      // Use the ACTUAL safety score from SolSniffer (not calculated from rugPullRisk)
+      securityData.solsnifferScore = data.score;
+      
+      // Store ALL security data
+      securityData.securityFlags = {
+        rugPullRisk: data.rugPullRisk,
+        honeypot: data.honeypot,
+        liquidityLocked: data.liquidityLocked,
+        lpBurned: data.lpBurned,
+        mintDisabled: data.mintAuthorityRenounced,
+        freezeDisabled: data.freezeAuthorityRenounced,
+        topHolderPercentage: data.topHolderPercentage,
+        riskLevel: data.riskLevel,
+        warnings: data.warnings,
+        highRiskCount: data.highRiskCount,
+        mediumRiskCount: data.mediumRiskCount,
+        lowRiskCount: data.lowRiskCount,
+        specificRisks: data.specificRisks,
+        rawIndicatorData: data.rawIndicatorData,
+        tokenInfo: data.tokenInfo
+      };
+      
+      apisUsed.push('solsniffer');
+      costIncurred += 0.01;
+      
+      // Track SolSniffer usage with score
+      await this.trackSolSnifferUsage(tokenAddress, securityData.solsnifferScore);
+      
+      logger.info(`[SOLSNIFFER] Score for ${tokenAddress}: ${securityData.solsnifferScore}`, {
+        riskLevel: data.riskLevel,
+        warnings: data.warnings.length,
+        risks: {
+          high: data.highRiskCount,
+          medium: data.mediumRiskCount,
+          low: data.lowRiskCount
+        }
+      });
     }
     
     // Top 10 concentration
@@ -577,8 +476,8 @@ private async getTop10Concentration(tokenAddress: string): Promise<number> {
         updated_at: new Date(),
       };
 
-      if (securityData && securityData.solsnifferScore !== undefined && securityData.solsnifferScore > 0) {
-        // Only update SolSniffer data if we have a fresh score
+      if (securityData && securityData.solsnifferScore !== undefined) {
+        // Save the SolSniffer score (0-100 where 100 is safest)
         updateData.solsniffer_score = securityData.solsnifferScore;
         updateData.solsniffer_checked_at = new Date();
         
@@ -591,7 +490,7 @@ private async getTop10Concentration(tokenAddress: string): Promise<number> {
         updateData.top_10_percent = Math.round(top10 * 100) / 100; // Round to 2 decimals
         
         // Save ALL security data in JSONB field
-        if (securityData.securityFlags && Object.keys(securityData.securityFlags).length > 0) {
+        if (securityData.securityFlags) {
           updateData.security_data = JSON.stringify(securityData.securityFlags);
         }
         
@@ -600,14 +499,6 @@ private async getTop10Concentration(tokenAddress: string): Promise<number> {
           top10Percent: updateData.top_10_percent,
           hasSecurityData: !!updateData.security_data
         });
-      } else if (securityData && securityData.top10Percent !== undefined) {
-        // Update just top10 if we have it but no SolSniffer
-        let top10 = securityData.top10Percent || 0;
-        if (top10 > 100) {
-          logger.warn(`[DB] Top 10 concentration ${top10}% exceeds 100%, capping at 100%`);
-          top10 = 100;
-        }
-        updateData.top_10_percent = Math.round(top10 * 100) / 100;
       }
 
       // Log the update data
@@ -626,7 +517,7 @@ private async getTop10Concentration(tokenAddress: string): Promise<number> {
       logger.info(`[DB] Updated ${result} rows for ${tokenAddress}`);
 
       // Verify update if security data was included
-      if (securityData && securityData.solsnifferScore > 0) {
+      if (securityData) {
         const updated = await db('tokens')
           .where('address', tokenAddress)
           .select('solsniffer_score', 'solsniffer_checked_at', 'security_data')

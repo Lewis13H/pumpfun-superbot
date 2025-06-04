@@ -50,28 +50,28 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
         on: {
           UPDATE_MARKET_CAP: [
             {
-             target: 'ARCHIVE',
-             cond: 'isZeroMarketCap',
-             actions: 'updateMarketCap',
+              target: 'ARCHIVE',
+              cond: 'isZeroMarketCap',
+              actions: 'updateMarketCap',
             },
             {
               target: 'LOW',
-              cond: 'isLowMarketCap',
+              cond: 'canTransitionFromNewToLow',
               actions: 'updateMarketCap',
             },
             {
               target: 'MEDIUM',
-              cond: 'isMediumMarketCap',
+              cond: 'canTransitionFromNewToMedium',
               actions: 'updateMarketCap',
             },
             {
               target: 'HIGH',
-              cond: 'isHighMarketCap',
+              cond: 'canTransitionFromNewToHigh',
               actions: 'updateMarketCap',
             },
             {
               target: 'AIM',
-              cond: 'isAimMarketCap',
+              cond: 'canTransitionFromNewToAim',
               actions: 'updateMarketCap',
             },
             {
@@ -335,6 +335,67 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
         return event.marketCap <= 0;
       },
       
+      // NEW state transitions with duration check
+      canTransitionFromNewToLow: (context, event) => {
+        if (event.type !== 'UPDATE_MARKET_CAP') return false;
+        const minimumDuration = 1800; // 30 minutes in seconds
+        const timeInNew = (Date.now() - context.categoryStartTime) / 1000;
+        const hasMinDuration = timeInNew >= minimumDuration;
+        const isLowCap = event.marketCap > 0 && event.marketCap < thresholds.LOW_MAX;
+        
+        if (!hasMinDuration) {
+          logger.debug(`Token ${context.tokenAddress} has only been in NEW for ${Math.round(timeInNew/60)} minutes, needs ${minimumDuration/60} minutes`);
+        }
+        
+        return isLowCap && hasMinDuration;
+      },
+      
+      canTransitionFromNewToMedium: (context, event) => {
+        if (event.type !== 'UPDATE_MARKET_CAP') return false;
+        const minimumDuration = 1800;
+        const timeInNew = (Date.now() - context.categoryStartTime) / 1000;
+        const hasMinDuration = timeInNew >= minimumDuration;
+        const isMediumCap = event.marketCap >= thresholds.LOW_MAX && 
+                            event.marketCap < thresholds.MEDIUM_MAX;
+        
+        if (!hasMinDuration) {
+          logger.debug(`Token ${context.tokenAddress} has only been in NEW for ${Math.round(timeInNew/60)} minutes, needs ${minimumDuration/60} minutes`);
+        }
+        
+        return isMediumCap && hasMinDuration;
+      },
+      
+      canTransitionFromNewToHigh: (context, event) => {
+        if (event.type !== 'UPDATE_MARKET_CAP') return false;
+        const minimumDuration = 1800;
+        const timeInNew = (Date.now() - context.categoryStartTime) / 1000;
+        const hasMinDuration = timeInNew >= minimumDuration;
+        const isHighCap = event.marketCap >= thresholds.MEDIUM_MAX && 
+                          event.marketCap < thresholds.HIGH_MAX;
+        
+        if (!hasMinDuration) {
+          logger.debug(`Token ${context.tokenAddress} has only been in NEW for ${Math.round(timeInNew/60)} minutes, needs ${minimumDuration/60} minutes`);
+        }
+        
+        return isHighCap && hasMinDuration;
+      },
+      
+      canTransitionFromNewToAim: (context, event) => {
+        if (event.type !== 'UPDATE_MARKET_CAP') return false;
+        const minimumDuration = 1800;
+        const timeInNew = (Date.now() - context.categoryStartTime) / 1000;
+        const hasMinDuration = timeInNew >= minimumDuration;
+        const isAimCap = event.marketCap >= thresholds.AIM_MIN && 
+                         event.marketCap <= thresholds.AIM_MAX;
+        
+        if (!hasMinDuration) {
+          logger.debug(`Token ${context.tokenAddress} has only been in NEW for ${Math.round(timeInNew/60)} minutes, needs ${minimumDuration/60} minutes`);
+        }
+        
+        return isAimCap && hasMinDuration;
+      },
+      
+      // Regular guards for other states (no duration check needed)
       isLowMarketCap: (context, event) => {
         if (event.type !== 'UPDATE_MARKET_CAP') return false;
         return event.marketCap > 0 && event.marketCap < thresholds.LOW_MAX;
@@ -383,9 +444,9 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
         lastScanTime: () => Date.now(),
       }),
       
-      logCategoryEntry: (context, event, { state }) => {
-        logger.info(`Token ${context.tokenAddress} entered ${state.value}`);
-      },
+      logCategoryEntry: assign({
+        categoryStartTime: () => Date.now(),  // Reset timer when entering new category
+      }),
       
       logCategoryExit: (context, event, { state }) => {
         logger.info(`Token ${context.tokenAddress} exiting ${state.value}`);

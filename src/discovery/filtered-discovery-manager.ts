@@ -214,7 +214,7 @@ export class FilteredDiscoveryManager extends EventEmitter {
       
 
       // Determine initial category based on market cap
-      const initialCategory = getCategoryFromMarketCap(marketData.marketCap);
+      const initialCategory = 'NEW';
       this.stats.categoryDistribution[initialCategory]++;
 
       // Extract pump.fun metadata
