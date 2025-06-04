@@ -4,7 +4,7 @@ import { TokenCategory, categoryConfig } from './category-config';
  * Determine category based on market cap
  */
 export function getCategoryFromMarketCap(marketCap: number): TokenCategory {
-  if (marketCap <= 0) return 'NEW';
+  if (marketCap <= 0) return 'ARCHIVE';
   
   const { thresholds } = categoryConfig;
   

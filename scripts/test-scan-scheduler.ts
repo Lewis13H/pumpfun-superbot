@@ -1,60 +1,79 @@
-import { scanScheduler } from "../src/category/scan-scheduler";
-import { categoryManager } from "../src/category/category-manager";
-import { db } from "../src/database/postgres";
-import { ScanTask, ScanResult } from "../src/category/scan-task.interface";
+import { scanScheduler } from '../src/category/scan-scheduler';
+import { tokenEnrichmentService } from '../src/analysis/token-enrichment-service';
+import { db } from '../src/database/postgres';
 
 async function testScanScheduler() {
-  console.log("Testing Scan Scheduler...\n");
-
-  try {
-    // Test 1: Initialize scheduler
-    console.log("Test 1: Starting Scan Scheduler");
-    await scanScheduler.start();
-    console.log("✅ Scheduler started successfully");
-
-    // Test 2: Schedule a test token
-    console.log("\nTest 2: Scheduling a test token");
-    const testToken = "TEST_SCHEDULER_123";
-    await scanScheduler.scheduleToken(testToken, "HIGH", 0);
-    console.log("✅ Token scheduled successfully");
-
-    // Test 3: Get stats
-    console.log("\nTest 3: Getting scheduler stats");
-    const stats = scanScheduler.getStats();
-    console.log("Stats:", JSON.stringify(stats, null, 2));
-
-    // Test 4: Register a test handler
-    console.log("\nTest 4: Registering scan handler");
-    scanScheduler.registerScanHandler("HIGH", async (task: ScanTask): Promise<ScanResult> => {
-      console.log(`Handler called for token: ${task.tokenAddress}`);
-      return {
-        tokenAddress: task.tokenAddress,
-        success: true,
-        marketCap: 25000,
-        duration: 100,
-        apisUsed: ["test"],
-      };
-    });
-    console.log("✅ Handler registered");
-
-    // Test 5: Handle category change
-    console.log("\nTest 5: Testing category change");
-    await scanScheduler.handleCategoryChange(testToken, "HIGH", "AIM");
-    const updatedStats = scanScheduler.getStats();
-    console.log("Updated stats:", JSON.stringify(updatedStats, null, 2));
-    console.log("✅ Category change handled");
-
-    // Clean up
-    console.log("\nCleaning up test data...");
-    await scanScheduler.stop();
+  console.log('=== Testing Scan Scheduler ===\n');
+  
+  // 1. Check if enrichment service is running
+  console.log('1. Checking Token Enrichment Service:');
+  const enrichmentStats = await tokenEnrichmentService.getStats();
+  console.log(`   Is Running: ${enrichmentStats.isRunning}`);
+  console.log(`   Stale Tokens: ${enrichmentStats.staleTokens}`);
+  
+  // 2. Start the enrichment service if not running
+  if (!enrichmentStats.isRunning) {
+    console.log('\n2. Starting Token Enrichment Service...');
+    await tokenEnrichmentService.start();
+    console.log('   ✅ Started');
+  }
+  
+  // 3. Get a sample token and try to schedule it
+  console.log('\n3. Testing manual token scheduling:');
+  const sampleToken = await db('tokens')
+    .where('category', 'LOW')
+    .whereNotNull('address')
+    .first();
+  
+  if (sampleToken) {
+    console.log(`   Scheduling ${sampleToken.symbol} (${sampleToken.address})`);
     
-    console.log("\n✅ All tests passed!");
-    process.exit(0);
-  } catch (error) {
-    console.error("❌ Test failed:", error);
-    await db.destroy();
-    process.exit(1);
+    try {
+      await scanScheduler.scheduleToken(
+        sampleToken.address,
+        sampleToken.category,
+        sampleToken.category_scan_count || 0
+      );
+      console.log('   ✅ Scheduled successfully');
+    } catch (error) {
+      console.log('   ❌ Scheduling failed:', error);
+    }
+  }
+  
+  // 4. Check stats after scheduling
+  console.log('\n4. Scan Scheduler Stats After:');
+  const stats = scanScheduler.getStats();
+  Object.entries(stats).forEach(([category, data]: [string, any]) => {
+    if (data.totalTasks > 0) {
+      console.log(`   ${category}: ${data.totalTasks} tasks`);
+    }
+  });
+  
+  // 5. Check if handlers are registered
+  console.log('\n5. Checking registered handlers:');
+  // This is a bit hacky but we need to check
+  const handlers = (scanScheduler as any).scanHandlers;
+  if (handlers && handlers.size) {
+    console.log(`   Registered handlers: ${handlers.size}`);
+    handlers.forEach((handler: any, category: string) => {
+      console.log(`   - ${category}: ${handler ? '✅' : '❌'}`);
+    });
+  } else {
+    console.log('   ❌ No handlers registered!');
   }
 }
 
-testScanScheduler();
+testScanScheduler()
+  .then(() => {
+    console.log('\nTest complete. Press Ctrl+C to exit.');
+    // Keep process alive to see if scans happen
+    setInterval(() => {
+      const stats = scanScheduler.getStats();
+      let total = 0;
+      Object.values(stats).forEach((s: any) => {
+        total += s.totalTasks || 0;
+      });
+      console.log(`Active tasks: ${total}`);
+    }, 5000);
+  })
+  .catch(console.error);

@@ -50,6 +50,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
         on: {
           UPDATE_MARKET_CAP: [
             {
+             target: 'ARCHIVE',
+             cond: 'isZeroMarketCap',
+             actions: 'updateMarketCap',
+            },
+            {
               target: 'LOW',
               cond: 'isLowMarketCap',
               actions: 'updateMarketCap',
@@ -325,6 +330,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
     },
   }, {
     guards: {
+      isZeroMarketCap: (context, event) => {
+        if (event.type !== 'UPDATE_MARKET_CAP') return false;
+        return event.marketCap <= 0;
+      },
+      
       isLowMarketCap: (context, event) => {
         if (event.type !== 'UPDATE_MARKET_CAP') return false;
         return event.marketCap > 0 && event.marketCap < thresholds.LOW_MAX;

@@ -1,45 +1,72 @@
 import { db } from '../src/database/postgres';
-import { buySignalEvaluator } from '../src/trading/buy-signal-evaluator';
 
 async function checkAimTokens() {
   console.log('=== Checking AIM Tokens ===\n');
   
-  // Get all tokens that recently entered AIM range
-  const potentialAim = await db('tokens')
-    .whereBetween('market_cap', [35000, 105000])
-    .orderBy('market_cap', 'desc')
-    .limit(10)
-    .select('address', 'symbol', 'category', 'market_cap', 'liquidity', 'holders');
+  // 1. Get all AIM tokens
+  const aimTokens = await db('tokens')
+    .where('category', 'AIM')
+    .select('address', 'symbol', 'market_cap', 'liquidity', 'holders', 'solsniffer_score', 
+            'updated_at', 'category_updated_at', 'aim_attempts', 'buy_attempts');
   
-  console.log(`Found ${potentialAim.length} tokens in AIM market cap range:\n`);
+  console.log(`Found ${aimTokens.length} tokens in AIM category:\n`);
   
-  for (const token of potentialAim) {
-    console.log(`${token.symbol}:`);
-    console.log(`  Category: ${token.category}`);
+  aimTokens.forEach(token => {
+    console.log(`Token: ${token.symbol} (${token.address.slice(0, 8)}...)`);
     console.log(`  Market Cap: $${token.market_cap}`);
-    console.log(`  Liquidity: $${token.liquidity || 0}`);
-    console.log(`  Holders: ${token.holders || 0}`);
-    
-    // Check what data is missing
-    const missing = [];
-    if (!token.liquidity || token.liquidity < 7500) missing.push('liquidity');
-    if (!token.holders || token.holders < 50) missing.push('holders');
-    
-    const solsnifferData = await db('tokens')
-      .where('address', token.address)
-      .select('solsniffer_score', 'solsniffer_checked_at', 'top_10_percent')
+    console.log(`  Liquidity: $${token.liquidity}`);
+    console.log(`  Holders: ${token.holders}`);
+    console.log(`  SolSniffer Score: ${token.solsniffer_score || 'N/A'}`);
+    console.log(`  Last Updated: ${token.updated_at}`);
+    console.log(`  Category Updated: ${token.category_updated_at}`);
+    console.log(`  AIM Attempts: ${token.aim_attempts}`);
+    console.log(`  Buy Attempts: ${token.buy_attempts}`);
+    console.log('');
+  });
+  
+  // 2. Check recent transitions to AIM
+  console.log('\n=== Recent Transitions to AIM ===\n');
+  
+  const recentTransitions = await db('category_transitions')
+    .where('to_category', 'AIM')
+    .orderBy('created_at', 'desc')
+    .limit(10)
+    .select('token_address', 'from_category', 'market_cap_at_transition', 'created_at');
+  
+  for (const transition of recentTransitions) {
+    const token = await db('tokens')
+      .where('address', transition.token_address)
       .first();
     
-    if (!solsnifferData?.solsniffer_score) missing.push('SolSniffer');
-    if (!solsnifferData?.top_10_percent) missing.push('concentration');
-    
-    if (missing.length > 0) {
-      console.log(`  ⚠️  Missing/Low: ${missing.join(', ')}`);
-    }
+    console.log(`${token?.symbol || transition.token_address.slice(0, 8)}: ${transition.from_category} → AIM`);
+    console.log(`  Market Cap at transition: $${transition.market_cap_at_transition}`);
+    console.log(`  Transition time: ${transition.created_at}`);
+    console.log(`  Current Market Cap: $${token?.market_cap}`);
     console.log('');
   }
   
-  await db.destroy();
+  // 3. Check if these tokens have been scanned
+  console.log('\n=== Recent Scans of AIM Tokens ===\n');
+  
+  for (const token of aimTokens.slice(0, 3)) {
+    const recentScans = await db('scan_logs')
+      .where('token_address', token.address)
+      .orderBy('created_at', 'desc')
+      .limit(5)
+      .select('category', 'scan_number', 'scan_duration_ms', 'apis_called', 'created_at');
+    
+    console.log(`Scans for ${token.symbol}:`);
+    if (recentScans.length === 0) {
+      console.log('  No recent scans found!');
+    } else {
+      recentScans.forEach(scan => {
+        console.log(`  ${scan.created_at}: Category ${scan.category}, APIs: ${scan.apis_called}`);
+      });
+    }
+    console.log('');
+  }
 }
 
-checkAimTokens();
+checkAimTokens()
+  .then(() => process.exit(0))
+  .catch(console.error);
