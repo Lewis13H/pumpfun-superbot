@@ -27,7 +27,7 @@ export class AggressiveScanner extends EventEmitter {
   
   constructor() {
     super();
-    this.birdeye = new BirdeyeClient();
+    this.birdeye = new BirdeyeClient(process.env.BIRDEYE_API_KEY || '');
     this.dexscreener = new DexScreenerClient();
   }
   
@@ -50,7 +50,7 @@ export class AggressiveScanner extends EventEmitter {
       
       try {
         await this.scanCategory(category, config);
-      } catch (error) {
+      } catch (error: any) {
         logger.error(`Scanner error for ${category}:`, error);
       }
     }, config.scanInterval);
@@ -65,11 +65,11 @@ export class AggressiveScanner extends EventEmitter {
       .where('category', category)
       .where(function() {
         this.whereNull('last_scan_at')
-          .orWhere('last_scan_at', '<', db.raw("NOW() - INTERVAL '? seconds'", [config.scanInterval / 1000]));
+          .orWhere('last_scan_at', '<', db.raw(`NOW() - INTERVAL '${config.scanInterval / 1000} seconds'`));
       })
       .orderBy('last_scan_at', 'asc')
       .limit(config.batchSize)
-      .select('address', 'symbol', 'market_cap');
+      .select('address', 'symbol', 'market_cap', 'curve_progress', 'bonding_curve');
     
     if (tokens.length === 0) return;
     
@@ -86,8 +86,8 @@ export class AggressiveScanner extends EventEmitter {
   
   private async scanToken(token: any, category: TokenCategory): Promise<void> {
     try {
-      // Try Birdeye first
-      let marketData = await this.fetchMarketData(token.address);
+      // Fetch market data
+      let marketData = await this.fetchMarketData(token.address, token.curve_progress);
       
       if (!marketData) {
         // Just update scan timestamp
@@ -119,24 +119,36 @@ export class AggressiveScanner extends EventEmitter {
         this.emit('surge', { token, oldMc: token.market_cap, newMc: marketData.marketCap });
       }
       
-    } catch (error) {
+      // Special logging for graduated tokens with real market cap
+      if (token.curve_progress >= 0.99 && Math.abs(token.market_cap - 69000) < 1000 && marketData.marketCap > 70000) {
+        logger.info(`🎓 ${token.symbol} graduated! Real MC: $${marketData.marketCap.toLocaleString()}`);
+      }
+      
+    } catch (error: any) {
       logger.error(`Error scanning ${token.symbol}:`, error);
     }
   }
   
-  private async fetchMarketData(address: string): Promise<any> {
+  private async fetchMarketData(address: string, curveProgress?: number): Promise<any> {
     try {
-      // Implement rate limiting and caching here
+      // Check if this is a graduated pump.fun token
+      if (curveProgress !== undefined && curveProgress >= 0.99) {
+        // Skip Birdeye for graduated tokens, go straight to DEX
+        logger.debug(`Token ${address} is graduated (${curveProgress}), using DEX data`);
+        return this.fetchFromDexScreener(address);
+      }
+      
+      // For non-graduated tokens, try Birdeye first
       const data = await this.birdeye.getTokenOverview(address);
       if (data) {
         return {
           marketCap: data.marketCap || 0,
           liquidity: data.liquidity || 0,
-          holders: data.holder || 0,
-          volume24h: data.v24hUSD || 0
+          holders: data.holders || 0,
+          volume24h: data.volume24h || 0
         };
       }
-    } catch (error) {
+    } catch (error: any) {
       if (error.response?.status === 429) {
         // Rate limited - wait and retry with DexScreener
         await new Promise(resolve => setTimeout(resolve, 5000));
@@ -152,15 +164,16 @@ export class AggressiveScanner extends EventEmitter {
       const pairs = await this.dexscreener.getTokenPairs(address);
       if (pairs && pairs.length > 0) {
         const pair = pairs[0];
+        
         return {
-          marketCap: parseFloat(pair.fdv || '0'),
-          liquidity: parseFloat(pair.liquidity?.usd || '0'),
-          volume24h: parseFloat(pair.volume?.h24 || '0'),
+          marketCap: pair.fdv || 0,
+          liquidity: pair.liquidity.usd || 0,
+          volume24h: pair.volume.h24 || 0,
           holders: 0 // DexScreener doesn't provide holder count
         };
       }
     } catch (error) {
-      // Ignore
+      logger.debug(`DexScreener fetch failed for ${address}:`, error);
     }
     return null;
   }
@@ -182,7 +195,23 @@ export class AggressiveScanner extends EventEmitter {
         if (result > 0) {
           logger.info(`⏰ Moved ${result} NEW tokens to LOW (timeout)`);
         }
-      } catch (error) {
+        
+        // Also fix any graduated tokens stuck at $69k
+        const graduatedStuck = await db('tokens')
+          .where('curve_progress', '>=', 0.99)
+          .where('market_cap', '>=', 68000)
+          .where('market_cap', '<=', 70000)
+          .limit(10)
+          .select('address', 'symbol');
+        
+        if (graduatedStuck.length > 0) {
+          logger.info(`🔧 Found ${graduatedStuck.length} graduated tokens stuck at $69k, re-scanning...`);
+          for (const token of graduatedStuck) {
+            await this.scanToken({ ...token, curve_progress: 1 }, 'AIM');
+          }
+        }
+        
+      } catch (error: any) {
         logger.error('Timeout processor error:', error);
       }
     }, 60000); // Every minute

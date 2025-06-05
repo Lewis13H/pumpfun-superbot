@@ -181,10 +181,10 @@ class RateLimitedScanner {
         const newCategory = updateResult.rows[0]?.category;
         
         if (newCategory !== token.category) {
-          console.log(`✅ Worker ${workerId}: ${token.symbol} ${token.category} → ${newCategory} ($${newMarketCap.toFixed(0)})`);
+          console.log(`✅ Worker ${workerId}: ${token.symbol} ${token.category} → ${newCategory} (${parseFloat(newMarketCap || 0).toFixed(0)})`);
           return true;
         } else if (expectedCategory !== newCategory) {
-          console.log(`⚠️  Worker ${workerId}: ${token.symbol} is ${newCategory} but should be ${expectedCategory} ($${newMarketCap.toFixed(0)})`);
+          console.log(`⚠️  Worker ${workerId}: ${token.symbol} is ${newCategory} but should be ${expectedCategory} (${parseFloat(newMarketCap || 0).toFixed(0)})`);
         }
         
         return false;

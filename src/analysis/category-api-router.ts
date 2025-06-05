@@ -182,18 +182,18 @@ export class CategoryAPIRouter {
           const liq = pair.liquidity as any;
           marketData.liquidity = parseFloat(liq.usd?.toString() || '0');
         } else {
-          marketData.liquidity = parseFloat(pair.liquidity?.toString() || '0');
+          marketData.liquidity = (pair.liquidity as any)?.usd || 0;
         }
       }
       
       // Handle volume24h
       if (pair.volume24h) {
-        marketData.volume24h = parseFloat(pair.volume24h?.toString() || '0');
+        marketData.volume24h = pair.volume?.h24 || 0;
       } else if ((pair as any).volume) {
         // Some responses have volume as an object
         const vol = (pair as any).volume;
         if (typeof vol === 'object' && vol !== null && vol.h24) {
-          marketData.volume24h = parseFloat(vol.h24?.toString() || '0');
+          marketData.volume24h = pair.volume?.h24 || 0;
         }
       }
       
@@ -367,13 +367,13 @@ export class CategoryAPIRouter {
           const liq = pair.liquidity as any;
           marketData.liquidity = parseFloat(liq.usd?.toString() || '0');
         } else {
-          marketData.liquidity = parseFloat(pair.liquidity?.toString() || '0');
+          marketData.liquidity = (pair.liquidity as any)?.usd || 0;
         }
       }
       
       // Handle volume24h
       if (pair.volume24h) {
-        marketData.volume24h = parseFloat(pair.volume24h?.toString() || '0');
+        marketData.volume24h = pair.volume?.h24 || 0;
       } else if ((pair as any).volume) {
         // Some responses have volume as an object
         const vol = (pair as any).volume;
@@ -711,3 +711,8 @@ private async getTop10Concentration(tokenAddress: string): Promise<number> {
 
 // Export singleton instance
 export const categoryAPIRouter = new CategoryAPIRouter();
+
+
+
+
+

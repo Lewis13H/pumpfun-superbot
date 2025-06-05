@@ -1,3 +1,4 @@
+// src/api/dexscreener-client.ts
 import { BaseAPIClient } from './base-api-client';
 
 export interface DexScreenerPair {
@@ -14,11 +15,43 @@ export interface DexScreenerPair {
     name: string;
     symbol: string;
   };
-  priceUsd: number;
-  volume24h: number;
-  liquidity: number;
+  priceNative: string;
+  priceUsd: string;
+  txns: {
+    m5: { buys: number; sells: number };
+    h1: { buys: number; sells: number };
+    h6: { buys: number; sells: number };
+    h24: { buys: number; sells: number };
+  };
+  volume: {
+    h24: number;
+    h6: number;
+    h1: number;
+    m5: number;
+  };
+  priceChange: {
+    m5: number;
+    h1: number;
+    h6: number;
+    h24: number;
+  };
+  liquidity: {
+    usd: number;
+    base: number;
+    quote: number;
+  };
   fdv: number;
-  priceChange24h: number;
+  marketCap: number;
+  pairCreatedAt: number;
+  // Optional fields (might not always be present)
+  volume24h?: number; // Some pairs might have this legacy field
+  info?: {
+    imageUrl?: string;
+    header?: string;
+    openGraph?: string;
+    websites?: string[];
+    socials?: Array<{ type: string; url: string }>;
+  };
 }
 
 export class DexScreenerClient extends BaseAPIClient {
@@ -32,7 +65,6 @@ export class DexScreenerClient extends BaseAPIClient {
       { method: 'GET' },
       0 // Free API
     );
-
     return data.pairs || [];
   }
 

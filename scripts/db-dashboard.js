@@ -53,7 +53,7 @@ async function displayDashboard() {
       console.log(`${colors.yellow}📊 CATEGORY DISTRIBUTION:${colors.reset}`);
       categories.rows.forEach(row => {
         const highlight = row.category === 'AIM' ? colors.green : '';
-        console.log(`  ${highlight}${row.category.padEnd(8)} ${row.count.toString().padStart(6)} tokens | ${row.active.toString().padStart(4)} active | MC: $${row.avg_mc}${colors.reset}`);
+        console.log(`  ${highlight}${row.category.padEnd(8)} ${row.count.toString().padStart(6)} tokens | ${row.active.toString().padStart(4)} active | MC: ${Math.round(parseFloat(row.avg_mc || 0))}${colors.reset}`);
       });
       
       // Hot Movements
@@ -76,7 +76,7 @@ async function displayDashboard() {
       console.log(`\n${colors.yellow}🔥 HOT MOVEMENTS (10 min):${colors.reset}`);
       movements.rows.forEach(row => {
         const emoji = row.to_category === 'AIM' ? '🎯' : row.to_category === 'HIGH' ? '📈' : '🏆';
-        console.log(`  ${emoji} ${row.symbol.padEnd(10)} ${row.from_category.padEnd(6)} → ${row.to_category.padEnd(7)} $${Math.round(row.mc).toString().padStart(8)}`);
+        console.log(`  ${emoji} ${row.symbol.padEnd(10)} ${row.from_category.padEnd(6)} → ${row.to_category.padEnd(7)} ${Math.round(parseFloat(row.mc || 0)).toString().padStart(8)}`);
       });
       
       // Scan Activity
@@ -126,7 +126,7 @@ async function displayDashboard() {
         console.log(`\n${colors.yellow}🏆 TOP GAINERS (1hr):${colors.reset}`);
         gainers.rows.forEach(row => {
           const age = Math.floor((Date.now() - new Date(row.created_at).getTime()) / 60000);
-          console.log(`  ${row.symbol.padEnd(10)} ${row.category.padEnd(7)} $${Math.round(row.market_cap).toString().padStart(8)} (${age}min old)`);
+          console.log(`  ${row.symbol.padEnd(10)} ${row.category.padEnd(7)} ${Math.round(parseFloat(row.market_cap || 0)).toString().padStart(8)} (${age}min old)`);
         });
       }
       
