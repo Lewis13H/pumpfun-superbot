@@ -420,3 +420,4 @@ export class ScanScheduler extends EventEmitter {
 // Export singleton instance
 export const scanScheduler = new ScanScheduler();
 
+

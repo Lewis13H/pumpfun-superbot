@@ -1,7 +1,7 @@
 // src/utils/token-v2-calculator.ts
 
 import { bondingCurveCalculator } from './pumpfun-bonding-curve';
-import { solPriceService } from '../services/sol-price-service';
+import { SOL_PRICE_SERVICE } from '../services/sol-price-service';
 
 export interface TokenV2Data {
   tokens_sold: number;
@@ -16,7 +16,7 @@ export function calculateTokenV2Data(
   marketCapUSD: number,
   pricePerToken?: number
 ): TokenV2Data {
-  const solPrice = solPriceService.getCurrentPrice() || 180;
+  const solPrice = SOL_PRICE_SERVICE.getPrice() || 180;;
   
   // Calculate progress from market cap (exponential curve)
   // Your curve: $4k to $69k range
@@ -54,3 +54,4 @@ export function calculateTokenV2Data(
     current_price_usd: currentPriceUSD
   };
 }
+

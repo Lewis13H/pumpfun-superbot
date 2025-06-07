@@ -65,3 +65,4 @@ describe('Token State Machine', () => {
     expect(service.state.value).toBe('ARCHIVE');
   });
 });
+

@@ -58,3 +58,4 @@ export class ScanHandlers {
     logger.info('Registered scan handlers for all categories');
   }
 }
+

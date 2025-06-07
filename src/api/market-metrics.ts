@@ -2,18 +2,16 @@
 import { Router } from 'express';
 import { logger } from '../utils/logger';
 import { db } from '../database/postgres';
-import { EnhancedTokenAnalyzer } from '../analysis/enhanced-token-analyzer';
 import { MarketMetricsAnalyzer } from '../analysis/market-metrics-analyzer';
 
 export const marketMetricsRouter = Router();
 
 // Initialize analyzers (these should be shared singletons in a real app)
-let enhancedAnalyzer: EnhancedTokenAnalyzer | null = null;
 let marketAnalyzer: MarketMetricsAnalyzer | null = null;
 
 // Initialize analyzers
-export function initializeAnalyzers(enhanced: EnhancedTokenAnalyzer, market: MarketMetricsAnalyzer) {
-  enhancedAnalyzer = enhanced;
+export function initializeAnalyzers(enhanced: any, market: MarketMetricsAnalyzer) {
+  // Enhanced analyzer has been removed
   marketAnalyzer = market;
 }
 
@@ -58,7 +56,7 @@ marketMetricsRouter.get('/overview', async (req, res) => {
       market_activity: marketActivity.rows[0],
       recent_alerts: recentAlerts,
       analyzer_status: {
-        enhanced_analyzer_running: enhancedAnalyzer?.getStats().isRunning || false,
+        enhanced_analyzer_running: false, // Enhanced analyzer removed
         market_analyzer_running: marketAnalyzer?.getStats().isRunning || false,
         tokens_monitored: marketAnalyzer?.getStats().tokensMonitored || 0,
       },
@@ -155,20 +153,34 @@ marketMetricsRouter.get('/token/:address', async (req, res) => {
     const { address } = req.params;
     const { include_history = 'false' } = req.query;
 
-    if (!enhancedAnalyzer) {
-      return res.status(500).json({ error: 'Enhanced analyzer not initialized' });
+    // Since enhanced analyzer is removed, get data from database
+    const tokenData = await db('tokens')
+      .select('*')
+      .where('address', address)
+      .first();
+    
+    if (!tokenData) {
+      return res.status(404).json({ error: 'Token not found' });
     }
 
-    // Get enhanced analysis
-    const analysis = await enhancedAnalyzer.getEnhancedAnalysis(address);
-    
-    if (!analysis) {
-      return res.status(404).json({ error: 'Token not found or not analyzed' });
-    }
+    const marketData = await db('market_analysis_current')
+      .select('*')
+      .where('address', address)
+      .first();
 
     let response: any = {
-      analysis,
-      current_metrics: analysis.marketMetrics,
+      analysis: {
+        tokenAddress: tokenData.address,
+        symbol: tokenData.symbol,
+        name: tokenData.name,
+        investmentTier: tokenData.investment_classification,
+        compositeScore: parseFloat(tokenData.composite_score || '0'),
+        safetyScore: parseFloat(tokenData.safety_score || '0'),
+        potentialScore: parseFloat(tokenData.potential_score || '0'),
+        marketCap: parseFloat(tokenData.market_cap || '0'),
+        liquidity: parseFloat(tokenData.liquidity || '0'),
+      },
+      current_metrics: marketData || {},
     };
 
     // Include historical data if requested
@@ -327,8 +339,8 @@ marketMetricsRouter.post('/token/:address/analyze', async (req, res) => {
   try {
     const { address } = req.params;
     
-    if (!enhancedAnalyzer || !marketAnalyzer) {
-      return res.status(500).json({ error: 'Analyzers not initialized' });
+    if (!marketAnalyzer) {
+      return res.status(500).json({ error: 'Market analyzer not initialized' });
     }
 
     // Check if token exists
@@ -341,20 +353,21 @@ marketMetricsRouter.post('/token/:address/analyze', async (req, res) => {
       return res.status(404).json({ error: 'Token not found' });
     }
 
-    // Trigger analysis
-    const tokenDiscovery = {
-      address: token.address,
-      symbol: token.symbol,
-      name: token.name,
-      platform: token.platform,
-      createdAt: token.created_at || new Date(),
-      metadata: token.raw_data || {},
+    // Since enhanced analyzer is removed, return basic analysis from database
+    const analysis = {
+      tokenAddress: token.address,
+      investmentTier: token.investment_classification || 'STANDARD',
+      compositeScore: parseFloat(token.composite_score || '0'),
+      marketHealthScore: parseFloat(token.market_health_score || '0'),
+      overallRiskScore: parseFloat(token.risk_score || '0'),
+      confidenceScore: parseFloat(token.confidence_score || '0'),
+      processingTimeMs: 0,
+      alertFlags: [],
+      reasoningPoints: ['Analysis based on existing database data'],
     };
 
-    const analysis = await enhancedAnalyzer.analyzeToken(tokenDiscovery);
-
     res.json({
-      message: 'Analysis completed',
+      message: 'Analysis retrieved from database',
       analysis: {
         token_address: analysis.tokenAddress,
         investment_tier: analysis.investmentTier,
@@ -494,7 +507,6 @@ marketMetricsRouter.get('/patterns', async (req, res) => {
 // Get analyzer statistics
 marketMetricsRouter.get('/stats', async (req, res) => {
   try {
-    const enhancedStats = enhancedAnalyzer?.getStats() || {};
     const marketStats = marketAnalyzer?.getStats() || {};
 
     // Get database statistics
@@ -516,7 +528,7 @@ marketMetricsRouter.get('/stats', async (req, res) => {
     res.json({
       timestamp: new Date().toISOString(),
       analyzers: {
-        enhanced_analyzer: enhancedStats,
+        enhanced_analyzer: { status: 'removed' }, // Enhanced analyzer has been removed
         market_analyzer: marketStats,
       },
       database: dbStats.rows[0],
@@ -534,4 +546,3 @@ marketMetricsRouter.get('/stats', async (req, res) => {
 });
 
 export default marketMetricsRouter;
-

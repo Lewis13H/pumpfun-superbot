@@ -182,3 +182,4 @@ export class BuySignalService extends EventEmitter {
 
 // Export singleton instance
 export const buySignalService = new BuySignalService();
+

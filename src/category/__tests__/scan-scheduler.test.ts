@@ -39,3 +39,4 @@ describe('ScanScheduler', () => {
     expect(stats.HIGH.totalTasks).toBe(1);
   });
 });
+

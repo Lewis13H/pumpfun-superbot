@@ -1,5 +1,8 @@
+// Ensure dotenv is loaded FIRST
+import dotenv from 'dotenv';
+dotenv.config();
+
 import knex from 'knex';
-import { config } from '../config';
 import { logger } from '../utils/logger';
 
 export const db = knex({
@@ -49,7 +52,7 @@ setInterval(() => {
       logger.warn(`DB Pool Alert - Used: ${used}, Free: ${free}, Pending: ${pending}`);
     }
   }
-}, 30000); // Check every 30 second
+}, 30000); // Check every 30 seconds
 
 export async function testConnection(): Promise<boolean> {
   try {

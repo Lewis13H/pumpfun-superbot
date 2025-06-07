@@ -2,7 +2,6 @@
 import { Server } from 'socket.io';
 import { Server as HttpServer } from 'http';
 import { logger } from '../../utils/logger';
-import { discoveryService } from '../../discovery/discovery-service';
 import { db } from '../../database/postgres';
 
 export class WebSocketManager {
@@ -18,7 +17,7 @@ export class WebSocketManager {
     });
 
     this.setupEventHandlers();
-    this.setupDiscoveryListeners();
+    this.setupPeriodicUpdates();
   }
 
   private setupEventHandlers() {
@@ -54,58 +53,7 @@ export class WebSocketManager {
     });
   }
 
-  private setupDiscoveryListeners() {
-    // Listen to discovery service events
-    const discoveryManager = (discoveryService as any).discoveryManager;
-    
-    // New token discovered
-    discoveryManager.on('tokenDiscovered', async (token: any) => {
-      this.broadcast('new-token', {
-        address: token.address,
-        symbol: token.symbol,
-        name: token.name,
-        platform: token.platform,
-        createdAt: token.createdAt,
-        discoveredAt: new Date(),
-        marketCap: 0,
-        current_price: 0,
-        priceChange24h: 0,
-        volume24h: 0,
-        liquidity: 0,
-        holders: 0,
-        safetyScore: 0,
-        potentialScore: 0,
-        compositeScore: 0,
-        investmentClassification: 'STANDARD',
-        analysisStatus: 'PENDING'
-      });
-    });
-
-    // Token analysis completed
-    const tokenProcessor = (discoveryService as any).tokenProcessor;
-    tokenProcessor.on('tokenReady', async (token: any) => {
-      // Fetch updated token data
-      const updatedToken = await db('tokens')
-        .where('address', token.address)
-        .first();
-
-      if (updatedToken) {
-        this.broadcast('token-update', {
-          address: updatedToken.address,
-          marketCap: Number(updatedToken.market_cap || 0),
-          current_price: Number(updatedToken.price || 0),
-          priceChange24h: Number(updatedToken.price_change_24h || 0),
-          volume24h: Number(updatedToken.volume_24h || 0),
-          liquidity: Number(updatedToken.liquidity || 0),
-          safetyScore: Number(updatedToken.safety_score || 0),
-          potentialScore: Number(updatedToken.potential_score || 0),
-          compositeScore: Number(updatedToken.composite_score || 0),
-          investmentClassification: updatedToken.investment_classification,
-          analysisStatus: updatedToken.analysis_status
-        });
-      }
-    });
-
+  private setupPeriodicUpdates() {
     // Periodic stats update
     setInterval(() => {
       this.broadcastDiscoveryStats();
@@ -117,12 +65,85 @@ export class WebSocketManager {
     }, 10000); // Every 10 seconds
   }
 
-  private async broadcastDiscoveryStats() {
-    const stats = discoveryService.getStats();
-    this.broadcast('discovery-stats', {
-      type: 'stats',
-      stats
+  // Method to emit new token discoveries from gRPC
+  public emitNewToken(token: any) {
+    this.broadcast('new-token', {
+      address: token.address,
+      symbol: token.symbol,
+      name: token.name,
+      platform: 'pump.fun',
+      createdAt: token.createdAt,
+      discoveredAt: new Date(),
+      marketCap: token.marketCap || 0,
+      current_price: token.current_price || 0,
+      priceChange24h: 0,
+      volume24h: 0,
+      liquidity: token.liquidity || 0,
+      holders: 0,
+      safetyScore: 0,
+      potentialScore: 0,
+      compositeScore: 0,
+      investmentClassification: 'STANDARD',
+      analysisStatus: 'PENDING'
     });
+  }
+
+  // Method to emit token updates
+  public async emitTokenUpdate(tokenAddress: string) {
+    const updatedToken = await db('tokens')
+      .where('address', tokenAddress)
+      .first();
+
+    if (updatedToken) {
+      this.broadcast('token-update', {
+        address: updatedToken.address,
+        marketCap: Number(updatedToken.market_cap || 0),
+        current_price: Number(updatedToken.current_price_usd || 0),
+        priceChange24h: Number(updatedToken.price_change_24h || 0),
+        volume24h: Number(updatedToken.volume_24h || 0),
+        liquidity: Number(updatedToken.liquidity || 0),
+        safetyScore: Number(updatedToken.safety_score || 0),
+        potentialScore: Number(updatedToken.potential_score || 0),
+        compositeScore: Number(updatedToken.composite_score || 0),
+        investmentClassification: updatedToken.investment_classification,
+        analysisStatus: updatedToken.analysis_status
+      });
+    }
+  }
+
+  private async broadcastDiscoveryStats() {
+    try {
+      // Get stats from database instead of discoveryService
+      const [
+        totalTokens,
+        recentTokens,
+        activeTokens
+      ] = await Promise.all([
+        db('tokens').count('* as count').first(),
+        db('tokens')
+          .where('created_at', '>', new Date(Date.now() - 3600000)) // Last hour
+          .count('* as count')
+          .first(),
+        db('tokens')
+          .where('category', 'IN', ['HIGH', 'AIM'])
+          .count('* as count')
+          .first()
+      ]);
+
+      const stats = {
+        tokensDiscovered: Number(totalTokens?.count || 0),
+        tokensLastHour: Number(recentTokens?.count || 0),
+        activeTokens: Number(activeTokens?.count || 0),
+        currentRate: Number(recentTokens?.count || 0) / 60 // Per minute
+      };
+
+      this.broadcast('discovery-stats', {
+        type: 'stats',
+        stats
+      });
+    } catch (error) {
+      logger.error('Error broadcasting discovery stats:', error);
+    }
   }
 
   private async broadcastApiStatus() {
@@ -136,7 +157,24 @@ export class WebSocketManager {
           responseTime: 200 + Math.random() * 100,
           successRate: 95 + Math.random() * 5
         },
-        // Add other services...
+        {
+          name: 'Birdeye',
+          status: 'operational',
+          responseTime: 150 + Math.random() * 50,
+          successRate: 97 + Math.random() * 3
+        },
+        {
+          name: 'DexScreener',
+          status: 'operational',
+          responseTime: 100 + Math.random() * 50,
+          successRate: 99 + Math.random() * 1
+        },
+        {
+          name: 'gRPC Stream',
+          status: 'operational',
+          responseTime: 50 + Math.random() * 20,
+          successRate: 99.5 + Math.random() * 0.5
+        }
       ]
     });
   }
@@ -145,7 +183,7 @@ export class WebSocketManager {
     this.broadcast('new-signal', {
       tokenAddress: signal.token_address,
       tokenSymbol: signal.symbol,
-      type: signal.signal_type,
+      type: signal.signal_type || signal.type,
       confidence: signal.confidence,
       strategy: signal.strategy,
       timestamp: signal.generated_at

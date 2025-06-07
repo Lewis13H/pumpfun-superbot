@@ -27,3 +27,4 @@ export interface ScanSchedule {
   completedScans: number;
   failedScans: number;
 }
+

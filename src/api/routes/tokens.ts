@@ -296,3 +296,4 @@ function generateMockSmartMoneyActivity() {
 
 export default router;
 
+

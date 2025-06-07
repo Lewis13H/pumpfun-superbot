@@ -129,3 +129,4 @@ describe('Category System Integration', () => {
     });
   });
 });
+

@@ -1,6 +1,19 @@
 import { db } from '../database/postgres';
 import { logger } from '../utils/logger';
-import { TokenAnalysis } from './base-analyzer';
+
+interface TokenAnalysis {
+  tokenAddress: string;
+  timestamp: Date;
+  analyzedAt: Date;
+  metrics: any;
+  score: number;
+  scores: {
+    overallScore: number;
+    [key: string]: number;
+  };
+  signals: any[];
+  status: 'success' | 'partial' | 'failed';
+}
 
 export class TokenAnalysisStorage {
   async storeAnalysis(analysis: TokenAnalysis): Promise<void> {
@@ -164,3 +177,4 @@ export class TokenAnalysisStorage {
     }
   }
 }
+

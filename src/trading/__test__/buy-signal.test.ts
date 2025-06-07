@@ -138,3 +138,4 @@ describe('Buy Signal System', () => {
     });
   });
 });
+

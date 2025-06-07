@@ -22,25 +22,78 @@ export class CategoryManager extends EventEmitter {
    */
   private async loadExistingTokens(): Promise<void> {
     try {
-      const tokens = await db('tokens')
-        .whereNotIn('category', ['BIN', 'COMPLETE'])
-        .select('address', 'category', 'market_cap', 'category_scan_count');
+      // Load only active tokens in batches to prevent connection exhaustion
+      const batchSize = 1000;
+      let offset = 0;
+      let totalLoaded = 0;
+    
+      // Only load recent active tokens
+      const baseQuery = db('tokens')
+        .whereIn('category', ['NEW', 'LOW', 'MEDIUM', 'HIGH', 'AIM'])
+        .where('created_at', '>', db.raw("NOW() - INTERVAL '7 days'")); // Remove orderBy from base query
+    
+      // Get total count (without orderBy)
+      const countResult = await baseQuery.clone().count('* as count').first();
+      const totalCount = typeof countResult?.count === 'number' 
+        ? countResult.count 
+        : parseInt(countResult?.count || '0');
+    
+      logger.info(`Loading ${totalCount} existing tokens into state machines`);
+    
+      // Load in batches (add orderBy only for data retrieval)
+      while (offset < totalCount) {
+        const tokens = await baseQuery
+          .clone()
+          .orderBy('created_at', 'desc')  // Add orderBy here instead
+          .limit(batchSize)
+          .offset(offset);
       
-      logger.info(`Loading ${tokens.length} existing tokens into state machines`);
-      
-      for (const token of tokens) {
-        await this.createOrRestoreStateMachine(
-          token.address,
-          token.category as TokenCategory,
-          {
-            currentMarketCap: Number(token.market_cap) || 0,
-            scanCount: token.category_scan_count || 0,
+        // Process this batch
+        for (const token of tokens) {
+          const machine = await this.createOrRestoreStateMachine(token.address, token.category);
+        
+          if (token.category && token.category !== 'NEW') {
+            const event = this.getEventForCategory(token.category);
+            if (event) {
+              machine.send(event);
+            }
           }
-        );
-      }
+        }
+      
+        offset += batchSize;
+        totalLoaded += tokens.length;
+      
+        logger.info(`Loaded ${totalLoaded}/${totalCount} tokens...`);
+      
+        // Give the database pool a chance to breathe
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }  
+    
+      logger.info(`✅ Loaded ${totalLoaded} tokens into state machines`);
     } catch (error) {
       logger.error('Error loading existing tokens:', error);
     }
+  }
+  
+  /**
+   * Get the appropriate event for transitioning to a category
+   */
+  private getEventForCategory(category: TokenCategory): TokenEvent | null {
+    // Map categories to their market cap thresholds
+    const categoryThresholds = {
+      LOW: { min: 0, max: categoryConfig.thresholds.LOW_MAX },
+      MEDIUM: { min: categoryConfig.thresholds.LOW_MAX, max: categoryConfig.thresholds.MEDIUM_MAX },
+      HIGH: { min: categoryConfig.thresholds.MEDIUM_MAX, max: categoryConfig.thresholds.HIGH_MAX },
+      AIM: { min: categoryConfig.thresholds.AIM_MIN, max: categoryConfig.thresholds.AIM_MAX },
+      ARCHIVE: { min: categoryConfig.thresholds.AIM_MAX + 1, max: Infinity }
+    };
+
+    const threshold = categoryThresholds[category as keyof typeof categoryThresholds];
+    if (!threshold) return null;
+
+    // Return a market cap update event with a value in the middle of the range
+    const marketCap = threshold.min + (threshold.max - threshold.min) / 2;
+    return { type: 'UPDATE_MARKET_CAP', marketCap };
   }
   
   /**
@@ -165,6 +218,28 @@ export class CategoryManager extends EventEmitter {
       type: 'UPDATE_MARKET_CAP',
       marketCap,
     });
+  }
+  
+  /**
+   * Update token category directly (for gRPC integration)
+   */
+  async updateTokenCategory(tokenAddress: string, newCategory: string, marketCap: number): Promise<void> {
+    try {
+      // Update through state machine
+      await this.updateTokenMarketCap(tokenAddress, marketCap);
+      
+      // Also update database directly for immediate consistency
+      await db('tokens')
+        .where('address', tokenAddress)
+        .update({
+          category: newCategory,
+          market_cap: marketCap,
+          updated_at: new Date()
+        });
+    } catch (error) {
+      logger.error(`Error updating token category for ${tokenAddress}:`, error);
+      throw error;
+    }
   }
   
   /**

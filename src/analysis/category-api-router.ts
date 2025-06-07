@@ -6,7 +6,7 @@ import { MoralisClient } from '../api/moralis-client';
 import { HeliusClient } from '../api/helius-client';
 import { RaydiumClient } from '../api/raydium-client';
 import { logger } from '../utils/logger';
-import { config } from '../config';
+import { Config } from '../config';
 import { db } from '../database/postgres';
 
 export interface CategoryAnalysisResult {
@@ -34,6 +34,7 @@ export interface CategoryAnalysisResult {
 }
 
 export class CategoryAPIRouter {
+  private config: Config;
   private solsniffer: SolSnifferClient;
   private birdeye: BirdeyeClient;
   private dexscreener: DexScreenerClient;
@@ -43,11 +44,12 @@ export class CategoryAPIRouter {
   
   private dailyCosts: Map<string, number> = new Map();
   
-  constructor() {
-    this.solsniffer = new SolSnifferClient(config.apis.solsnifferApiKey);
-    this.birdeye = new BirdeyeClient(config.apis.birdeyeApiKey);
+  constructor(config: Config) {
+    this.config = config;
+    this.solsniffer = new SolSnifferClient(config.apis.solsnifferApiKey || '');
+    this.birdeye = new BirdeyeClient(config.apis.birdeyeApiKey || '');
     this.dexscreener = new DexScreenerClient();
-    this.moralis = new MoralisClient(config.apis.moralisApiKey);
+    this.moralis = new MoralisClient(config.apis.moralisApiKey || '');
     this.helius = new HeliusClient(config.apis.heliusRpcUrl);
     this.raydium = new RaydiumClient();
   }
@@ -710,7 +712,9 @@ private async getTop10Concentration(tokenAddress: string): Promise<number> {
 }
 
 // Export singleton instance
-export const categoryAPIRouter = new CategoryAPIRouter();
+import { config } from '../config';
+export const categoryAPIRouter = new CategoryAPIRouter(config);
+
 
 
 

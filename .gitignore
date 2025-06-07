@@ -7,3 +7,39 @@ logs/
 dist/
 build/
 .vscode/
+
+# TypeScript build artifacts
+*.js.map
+*.d.ts.map
+*.tsbuildinfo
+
+# Additional build artifacts
+coverage/
+.nyc_output/
+.cache/
+.temp/
+.tmp/
+
+# OS generated files
+Thumbs.db
+.DS_Store?
+ehthumbs.db
+Icon?
+
+# IDE files
+.idea/
+*.swp
+*.swo
+*~
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache

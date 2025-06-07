@@ -22,3 +22,4 @@ export async function writeTokenMetrics(data: any): Promise<void> {
 export async function writeDiscoveryEvent(data: any): Promise<void> {
   logger.debug('Would write discovery event to QuestDB:', data);
 }
+

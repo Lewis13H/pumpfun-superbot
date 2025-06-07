@@ -2,7 +2,16 @@ import axios from 'axios';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { TokenMetrics } from './base-analyzer';
+
+// Add after imports
+interface TokenMetrics {
+  marketCap?: number;
+  liquidity?: number;
+  volume24h?: number;
+  holders?: number;
+  priceChange24h?: number;
+  [key: string]: any;
+}
 
 export class MetricsFetcher {
   private connection: Connection;
@@ -136,4 +145,6 @@ export class MetricsFetcher {
     this.cache.set(key, { data, timestamp: Date.now() });
   }
 }
+
+
 

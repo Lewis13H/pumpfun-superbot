@@ -1,174 +1,147 @@
-import * as dotenv from 'dotenv';
-import * as Joi from 'joi';
-import * as path from 'path';
+// src/config/index.ts
 
+import dotenv from 'dotenv';
+
+// Load environment variables
 dotenv.config();
 
-const envSchema = Joi.object({
+export interface Config {
   // Database
-  POSTGRES_HOST: Joi.string().required(),
-  POSTGRES_PORT: Joi.number().default(5432),
-  POSTGRES_USER: Joi.string().required(),
-  POSTGRES_PASSWORD: Joi.string().required(),
-  POSTGRES_DB: Joi.string().required(),
+  POSTGRES_HOST: string;
+  POSTGRES_PORT: number;
+  POSTGRES_USER: string;
+  POSTGRES_PASSWORD: string;
+  POSTGRES_DB: string;
+  DB_POOL_MAX: number;
   
-  QUESTDB_HOST: Joi.string().required(),
-  QUESTDB_HTTP_PORT: Joi.number().default(9000),
-  QUESTDB_PG_PORT: Joi.number().default(8812),
-  QUESTDB_ILP_PORT: Joi.number().default(9009),
+  // gRPC Configuration
+  GRPC_ENDPOINT: string;
+  GRPC_TOKEN: string;
+  GRPC_BATCH_SIZE: number;
+  GRPC_FLUSH_INTERVAL: number;
   
-  // API Keys
-  HELIUS_RPC_URL: Joi.string().required(),
-  SOLSNIFFER_API_KEY: Joi.string().required(),
-  BIRDEYE_API_KEY: Joi.string().required(),
-  MORALIS_API_KEY: Joi.string().required(),
-
-  // PumpFun specific
-  PUMPFUN_WS_URL: Joi.string().default('wss://pumpportal.fun/api/data'),
-  PUMPFUN_API_URL: Joi.string().default('https://frontend-api.pump.fun'),
-  PUMPFUN_PRIMARY_METHOD: Joi.string().valid('logs', 'blocks', 'websocket').default('logs'),
-  PUMPFUN_MIN_LIQUIDITY: Joi.number().default(0.1),
-  PUMPFUN_MIN_HOLDERS: Joi.number().default(10),
-  PUMPFUN_MAX_TOKEN_AGE: Joi.number().default(300), // 5 minutes
-  PUMPFUN_MAX_CREATOR_TOKENS_DAILY: Joi.number().default(5),
-  PUMPFUN_MIN_CREATOR_REPUTATION: Joi.number().min(0).max(1).default(0.5),
+  // RPC & APIs (for enriched data)
+  HELIUS_RPC_URL: string;
+  SOLSNIFFER_API_KEY?: string;
+  BIRDEYE_API_KEY?: string;
+  COINGECKO_API_KEY?: string;
   
-  // Discovery
-  RAYDIUM_PROGRAM_ID: Joi.string().default('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'),
-  MAX_CONCURRENT_PROCESSING: Joi.number().default(10),
-  DISCOVERY_QUEUE_SIZE: Joi.number().default(1000),
+  // API object for backward compatibility
+  apis: {
+    solsnifferApiKey?: string;
+    birdeyeApiKey?: string;
+    heliusRpcUrl: string;
+    moralisApiKey?: string;
+  };
   
-  // Application
-  NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
-  PORT: Joi.number().default(3000),
-  LOG_LEVEL: Joi.string().valid('error', 'warn', 'info', 'debug').default('info'),
-}).unknown();
-
-const { value: envVars, error } = envSchema.validate(process.env);
-
-if (error) {
-  throw new Error(`Config validation error: ${error.message}`);
+  // Category Thresholds
+  CATEGORY_LOW_MAX: number;
+  CATEGORY_MEDIUM_MAX: number;
+  CATEGORY_HIGH_MAX: number;
+  CATEGORY_AIM_MIN: number;
+  CATEGORY_AIM_MAX: number;
+  
+  // Performance
+  PRICE_CHANGE_INTERVAL: number;
+  
+  // Features
+  DISABLE_SOLSNIFFER: boolean;
+  ENABLE_TRADING: boolean;
+  WEBSOCKET_ENABLED: boolean;
+  WEBSOCKET_PORT: number;
+  
+  // Price Data
+  SOL_PRICE_USD: number;
+  
+  // Logging
+  LOG_LEVEL: string;
+  LOG_TO_FILE: boolean;
 }
 
-export const config = {
-  env: envVars.NODE_ENV,
-  port: envVars.PORT,
-  logLevel: envVars.LOG_LEVEL,
-  
-  postgres: {
-    host: envVars.POSTGRES_HOST,
-    port: envVars.POSTGRES_PORT,
-    user: envVars.POSTGRES_USER,
-    password: envVars.POSTGRES_PASSWORD,
-    database: envVars.POSTGRES_DB,
-  },
-  
-  questdb: {
-    host: envVars.QUESTDB_HOST,
-    httpPort: envVars.QUESTDB_HTTP_PORT,
-    pgPort: envVars.QUESTDB_PG_PORT,
-    ilpPort: envVars.QUESTDB_ILP_PORT,
-  },
-  
-  apis: {
-    heliusRpcUrl: envVars.HELIUS_RPC_URL,
-    solsnifferApiKey: envVars.SOLSNIFFER_API_KEY,
-    birdeyeApiKey: envVars.BIRDEYE_API_KEY,
-    moralisApiKey: envVars.MORALIS_API_KEY,
-    rateLimit: {
-      maxRequestsPerMinute: 30,
-      retryDelays: [1000, 2000, 4000], // milliseconds
-    }  
-  },
+// Helper function to ensure URL has protocol
+function ensureProtocol(url: string): string {
+  if (!url) return url;
+  const trimmed = url.trim();
+  if (trimmed.includes('://')) {
+    return trimmed;
+  }
+  return `https://${trimmed}`;
+}
 
-  discovery: {
-    pumpfunWsUrl: envVars.PUMPFUN_WS_URL,
-    pumpfunApiUrl: envVars.PUMPFUN_API_URL,
-    raydiumProgramId: envVars.RAYDIUM_PROGRAM_ID,
-    maxConcurrentProcessing: envVars.MAX_CONCURRENT_PROCESSING,
-    discoveryQueueSize: envVars.DISCOVERY_QUEUE_SIZE,
-    
-    // PumpFun enhanced settings
-    pumpfun: {
-      // WebSocket endpoints to try in order
-      wsEndpoints: [
-        envVars.PUMPFUN_WS_URL,
-        'wss://frontend-api.pump.fun/ws',
-      ],
-      
-      // Monitoring preferences
-      primaryMethod: envVars.PUMPFUN_PRIMARY_METHOD,
-      enableFallback: true,
-      
-      // Discovery filters
-      minLiquidity: envVars.PUMPFUN_MIN_LIQUIDITY,
-      minHolders: envVars.PUMPFUN_MIN_HOLDERS,
-      maxTokenAge: envVars.PUMPFUN_MAX_TOKEN_AGE,
-      
-      // Bonding curve constants
-      raydiumMigrationThreshold: 69420, // SOL required for migration
-      tokenDecimals: 6, // pump.fun uses 6 decimals
-      
-      // Creator filtering
-      maxCreatorTokensPerDay: envVars.PUMPFUN_MAX_CREATOR_TOKENS_DAILY,
-      minCreatorReputation: envVars.PUMPFUN_MIN_CREATOR_REPUTATION,
-      blacklistedCreators: [], // Can be loaded from DB or env
-      
-      // Performance tuning
-      curveDataCacheTTL: 30000, // 30 seconds
-      maxRetries: 3,
-      retryDelay: 1000,
-    },
+export const config: Config = {
+  // Database Configuration
+  POSTGRES_HOST: process.env.POSTGRES_HOST || 'localhost',
+  POSTGRES_PORT: parseInt(process.env.POSTGRES_PORT || '5433'),
+  POSTGRES_USER: process.env.POSTGRES_USER || 'memecoin_user',
+  POSTGRES_PASSWORD: process.env.POSTGRES_PASSWORD || '',
+  POSTGRES_DB: process.env.POSTGRES_DB || 'memecoin_discovery',
+  DB_POOL_MAX: parseInt(process.env.DB_POOL_MAX || '20'),
+  
+  // gRPC Configuration - ensure endpoint has protocol
+  GRPC_ENDPOINT: ensureProtocol(process.env.GRPC_ENDPOINT || 'grpc.ams.shyft.to'),
+  GRPC_TOKEN: process.env.GRPC_TOKEN || '0b63e431-3145-4101-ac9d-68f8b33ded4b',
+  GRPC_BATCH_SIZE: parseInt(process.env.GRPC_BATCH_SIZE || '1000'),
+  GRPC_FLUSH_INTERVAL: parseInt(process.env.GRPC_FLUSH_INTERVAL || '1000'),
+  
+  // RPC & APIs
+  HELIUS_RPC_URL: process.env.HELIUS_RPC_URL || '',
+  SOLSNIFFER_API_KEY: process.env.SOLSNIFFER_API_KEY,
+  BIRDEYE_API_KEY: process.env.BIRDEYE_API_KEY,
+  COINGECKO_API_KEY: process.env.COINGECKO_API_KEY,
+  
+  // API object for backward compatibility
+  apis: {
+    solsnifferApiKey: process.env.SOLSNIFFER_API_KEY,
+    birdeyeApiKey: process.env.BIRDEYE_API_KEY,
+    heliusRpcUrl: process.env.HELIUS_RPC_URL || '',
+    moralisApiKey: process.env.MORALIS_API_KEY,
   },
   
-  // Analysis configuration with pump.fun enhancements
-  analysis: {
-    // Standard weights
-    weights: {
-      safety: 0.3,
-      liquidity: 0.25,
-      community: 0.2,
-      momentum: 0.15,
-      potential: 0.1,
-    },
-    
-    // PumpFun specific analysis weights
-    pumpfunWeights: {
-      curveHealth: 0.2,
-      migrationPotential: 0.15,
-      creatorReputation: 0.15,
-      initialLiquidity: 0.25,
-      priceStability: 0.25,
-    },
-    
-    // Classification thresholds
-    thresholds: {
-      strongBuy: 0.8,
-      buy: 0.65,
-      consider: 0.5,
-      monitor: 0.35,
-      avoid: 0.2,
-    },
-    
-    // PumpFun specific thresholds
-    pumpfunThresholds: {
-      minCurveProgress: 5, // Minimum % progress to consider
-      healthyReserveRatio: 0.8, // Virtual/real reserves ratio
-      suspiciousVolumeSpike: 10, // 10x average volume
-      rugPullLiquidityDrop: 0.5, // 50% liquidity drop
-    },
-  },
+  // Category Thresholds
+  CATEGORY_LOW_MAX: parseInt(process.env.CATEGORY_LOW_MAX || '8000'),
+  CATEGORY_MEDIUM_MAX: parseInt(process.env.CATEGORY_MEDIUM_MAX || '19000'),
+  CATEGORY_HIGH_MAX: parseInt(process.env.CATEGORY_HIGH_MAX || '35000'),
+  CATEGORY_AIM_MIN: parseInt(process.env.CATEGORY_AIM_MIN || '35000'),
+  CATEGORY_AIM_MAX: parseInt(process.env.CATEGORY_AIM_MAX || '105000'),
   
-  // System paths
-  paths: {
-    idl: path.join(__dirname, '../../idl'),
-    data: path.join(__dirname, '../../data'),
-    logs: path.join(__dirname, '../../logs'),
-    cache: path.join(__dirname, '../../cache'),
-  },
+  // Performance
+  PRICE_CHANGE_INTERVAL: parseInt(process.env.PRICE_CHANGE_INTERVAL || '300000'), // 5 minutes
+  
+  // Features
+  DISABLE_SOLSNIFFER: process.env.DISABLE_SOLSNIFFER === 'true',
+  ENABLE_TRADING: process.env.ENABLE_TRADING !== 'false', // Default true
+  WEBSOCKET_ENABLED: process.env.WEBSOCKET_ENABLED === 'true',
+  WEBSOCKET_PORT: parseInt(process.env.WEBSOCKET_PORT || '8080'),
+  
+  // Price Data
+  SOL_PRICE_USD: parseFloat(process.env.SOL_PRICE_USD || '100'),
+  
+  // Logging
+  LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+  LOG_TO_FILE: process.env.LOG_TO_FILE !== 'false' // Default true
 };
 
-// Export types for better IDE support
-export type Config = typeof config;
-export type PumpFunConfig = typeof config.discovery.pumpfun;
-export type AnalysisConfig = typeof config.analysis;
+// Validate configuration
+export function validateConfig(): void {
+  const required: (keyof Config)[] = [
+    'POSTGRES_PASSWORD',
+    'HELIUS_RPC_URL'
+  ];
+  
+  const missing = required.filter(key => !config[key]);
+  
+  if (missing.length > 0) {
+    throw new Error(`Missing required configuration: ${missing.join(', ')}`);
+  }
+  
+  // Validate thresholds are in order
+  if (config.CATEGORY_LOW_MAX >= config.CATEGORY_MEDIUM_MAX ||
+      config.CATEGORY_MEDIUM_MAX >= config.CATEGORY_HIGH_MAX ||
+      config.CATEGORY_HIGH_MAX >= config.CATEGORY_AIM_MIN ||
+      config.CATEGORY_AIM_MIN >= config.CATEGORY_AIM_MAX) {
+    throw new Error('Category thresholds must be in ascending order');
+  }
+  
+  // Log the gRPC endpoint being used
+  console.log(`Using gRPC endpoint: ${config.GRPC_ENDPOINT}`);
+}

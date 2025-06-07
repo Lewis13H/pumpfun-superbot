@@ -259,8 +259,8 @@ export class MarketMetricsAnalyzer extends EventEmitter {
 
       const response = await fetch(`https://public-api.birdeye.so/public/price?address=${tokenAddress}`, {
         headers: {
-          'X-API-KEY': config.apis.birdeyeApiKey,
-        },
+            'X-API-KEY': config.apis.birdeyeApiKey || '',
+         },
       });
 
       if (!response.ok) {
@@ -917,6 +917,8 @@ export class MarketMetricsAnalyzer extends EventEmitter {
     };
   }
 }
+
+
 
 
 

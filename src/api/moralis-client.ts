@@ -47,3 +47,4 @@ export class MoralisClient extends BaseAPIClient {
     }
   }
 }
+

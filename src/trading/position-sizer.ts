@@ -232,3 +232,4 @@ export class PositionSizer {
 
 // Export singleton instance
 export const positionSizer = new PositionSizer();
+

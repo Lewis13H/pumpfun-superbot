@@ -143,3 +143,4 @@ export class TokenEnrichmentService extends EventEmitter {
 
 // Export singleton instance
 export const tokenEnrichmentService = new TokenEnrichmentService();
+

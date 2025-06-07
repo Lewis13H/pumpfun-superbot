@@ -60,3 +60,4 @@ export const PUMP_FUN_CONSTANTS = {
 
 // Type exports for better TypeScript support
 export type PumpFunConstants = typeof PUMP_FUN_CONSTANTS;
+
