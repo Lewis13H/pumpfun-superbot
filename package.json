@@ -4,8 +4,15 @@
   "description": "Solana token discovery and analysis system",
   "main": "dist/index.js",
   "scripts": {
+    "dashboard": "ts-node src/dashboard/start-dashboard.ts",
+    "dashboard:dev": "nodemon --watch src --exec ts-node src/dashboard/start-dashboard.ts",
+    "dashboard:fixed": "ts-node src/dashboard/start-dashboard-fixed.ts",
+    "monitor": "ts-node src/dashboard/monitor.ts",
+    "dashboard:standalone": "ts-node src/dashboard/standalone-dashboard.ts",
+    "dashboard:prod": "node dist/dashboard/start-dashboard.js",
     "dev": "nodemon --exec ts-node src/index.ts",
     "dev:full": "node start-dev.js",
+    "bot": "ts-node src/grpc/grpc-stream-app.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "jest",
@@ -31,7 +38,9 @@
     "setup:pumpfun": "ts-node scripts/setup-pumpfun-files.ts",
     "grpc:start": "node dist/grpc/grpc-stream-app.js",
     "grpc:dev": "ts-node src/grpc/grpc-stream-app.ts",
-    "grpc:compare": "node scripts/compare-grpc-vs-old.js"
+    "grpc:compare": "node scripts/compare-grpc-vs-old.js",
+    "dashboard:simple:dev": "nodemon --watch src --exec ts-node src/dashboard/simple-dashboard.ts",
+    "dashboard:simple": "ts-node src/dashboard/simple-dashboard.ts"
   },
   "keywords": [
     "solana",
@@ -57,8 +66,11 @@
     "@xstate/react": "^3.2.2",
     "axios": "^1.9.0",
     "bcrypt": "^6.0.0",
+    "blessed": "^0.1.81",
+    "blessed-contrib": "^4.11.0",
     "bs58": "^6.0.0",
     "chalk": "^4.1.2",
+    "cli-table3": "^0.6.5",
     "compression": "^1.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.1",
@@ -80,6 +92,7 @@
     "xstate": "^4.38.3"
   },
   "devDependencies": {
+    "@types/blessed": "^0.1.25",
     "@types/bs58": "^4.0.4",
     "@types/compression": "^1.7.5",
     "@types/cors": "^2.8.18",

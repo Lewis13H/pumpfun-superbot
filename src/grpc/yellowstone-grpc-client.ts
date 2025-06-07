@@ -1,8 +1,9 @@
-// src/grpc/yellowstone-grpc-client.ts - V2 with account subscriptions and better token detection
+// src/grpc/yellowstone-grpc-client.ts - V3 with proper bonding curve subscription
 
 import { EventEmitter } from 'events';
 import { logger } from '../utils/logger';
 import { db } from '../database/postgres';
+import { struct, bool, u64, u8, publicKey } from '@coral-xyz/borsh';
 
 // Fix for bs58 - it exports as { default: { encode, decode } }
 const bs58 = require('bs58').default;
@@ -15,9 +16,21 @@ const Client = YellowstoneGrpc.default;
 const PUMP_FUN_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const SYSTEM_PROGRAM = '11111111111111111111111111111111';
 const BONDING_CURVE_DISCRIMINATOR = Buffer.from([23, 43, 44, 206, 33, 208, 132, 4]);
-const CREATE_DISCRIMINATORS = [24, 234];
-const BUY_DISCRIMINATOR = 102;
-const SELL_DISCRIMINATOR = 51;
+const CREATE_DISCRIMINATORS = [181, 234]; // 0xb5 = 181, 0xea = 234  
+const BUY_DISCRIMINATOR = 102; // 0x66
+const SELL_DISCRIMINATOR = 51; // 0x33
+
+// Bonding curve structure based on Shyft example
+const bondingCurveStructure = struct([
+  u64("discriminator"),
+  u64("virtualTokenReserves"),
+  u64("virtualSolReserves"),
+  u64("realTokenReserves"),
+  u64("realSolReserves"),
+  u64("tokenTotalSupply"),
+  bool("complete"),
+  publicKey("tokenMint")
+]);
 
 export interface YellowstoneConfig {
   endpoint: string;
@@ -58,7 +71,7 @@ export interface TokenTransaction {
 }
 
 interface BondingCurveAccount {
-  discriminator: Buffer;
+  discriminator: bigint;
   virtualTokenReserves: bigint;
   virtualSolReserves: bigint;
   realTokenReserves: bigint;
@@ -66,8 +79,7 @@ interface BondingCurveAccount {
   tokenTotalSupply: bigint;
   complete: boolean;
   tokenMint: string;
-  bondingCurveAddress?: string;
-  bumpSeed?: bigint;
+  bondingCurveAddress: string;
   curveProgress?: number;
 }
 
@@ -79,9 +91,8 @@ export class YellowstoneGrpcClient extends EventEmitter {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private solPriceUsd = 100;
-  private bondingCurves: Map<string, string> = new Map(); // tokenMint -> bondingCurve
-  private trackingTokens: Set<string> = new Set();
-  private subscribedAccounts: Set<string> = new Set();
+  private bondingCurveToToken: Map<string, string> = new Map(); // bondingCurve -> tokenMint
+  private tokenToBondingCurve: Map<string, string> = new Map(); // tokenMint -> bondingCurve
   
   constructor(config: YellowstoneConfig) {
     super();
@@ -104,7 +115,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
     });
     
     try {
-      // Create client directly without bridge
       this.client = new Client(endpointWithProtocol, cleanToken, undefined);
       logger.info('✅ Client created successfully');
     } catch (error) {
@@ -135,7 +145,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
     } catch (error) {
       logger.error('Failed to connect to gRPC:', error);
       
-      // If initial connection fails, try to reconnect
       if (this.reconnectAttempts < this.maxReconnectAttempts) {
         this.handleReconnect();
       } else {
@@ -147,7 +156,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
   private setupStreamHandlers(): void {
     // Data handler
     this.stream.on('data', (data: any) => {
-      // Don't process data if we're not connected
       if (!this.isConnected) return;
       
       this.handleStreamData(data).catch(error => {
@@ -156,12 +164,11 @@ export class YellowstoneGrpcClient extends EventEmitter {
       });
     });
     
-    // Error handler - following Shyft's pattern
+    // Error handler
     this.stream.on('error', (error: Error) => {
       logger.error('Stream error:', error);
       this.isConnected = false;
       this.emit('error', error);
-      // Don't immediately disconnect - let the stream end naturally
     });
     
     // End handler
@@ -182,7 +189,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
   }
   
   private async handleReconnect(): Promise<void> {
-    // Following Shyft's reconnect pattern
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       logger.error('Max reconnection attempts reached');
       this.emit('maxReconnectAttemptsReached');
@@ -196,43 +202,39 @@ export class YellowstoneGrpcClient extends EventEmitter {
     
     setTimeout(async () => {
       try {
-        // Reset the stream
         this.stream = null;
-        
-        // Reconnect
         await this.connect();
-        
-        // Reset attempts on successful connection
         this.reconnectAttempts = 0;
       } catch (error) {
         logger.error('Reconnection failed:', error);
-        // Will trigger another reconnect through the error/end handlers
       }
     }, delay);
   }
   
   private async sendSubscriptionRequest(): Promise<void> {
-    // Subscribe to both transactions AND accounts
+    // Subscribe to both transactions AND accounts (following Shyft example)
     const request = {
+      slots: {},
       accounts: {
+        // Subscribe to all Pump bonding curve accounts that are not complete
         pumpBondingCurves: {
-          account: [], // Will be populated dynamically
-          owner: ['6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'],
+          account: [],
           filters: [{
             memcmp: {
-              offset: 0,
-              bytes: BONDING_CURVE_DISCRIMINATOR.toString('base64')
+              offset: bondingCurveStructure.offsetOf('complete').toString(),
+              bytes: Uint8Array.from([0]) // Filter for complete = false
             }
-          }]
+          }],
+          owner: [PUMP_FUN_PROGRAM]
         }
       },
-      slots: {},
       transactions: {
+        // Also subscribe to transactions to catch token creations
         pumpFun: {
           vote: false,
           failed: false,
           signature: undefined,
-          accountInclude: ['6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'],
+          accountInclude: [PUMP_FUN_PROGRAM],
           accountExclude: [],
           accountRequired: []
         }
@@ -246,7 +248,7 @@ export class YellowstoneGrpcClient extends EventEmitter {
       commitment: 1 // CommitmentLevel.CONFIRMED
     };
 
-    logger.debug('Sending subscription request with account monitoring...');
+    logger.debug('Sending subscription request...');
 
     return new Promise<void>((resolve, reject) => {
       this.stream.write(request, (err: any) => {
@@ -263,24 +265,24 @@ export class YellowstoneGrpcClient extends EventEmitter {
   
   private async handleStreamData(data: any): Promise<void> {
     try {
-      // Add defensive check
       if (!data) return;
       
-      // Handle different types of updates
+      // Handle account updates (bonding curves)
+      if (data.account) {
+        await this.handleAccountUpdate(data);
+      }
+      
+      // Handle transactions
       if (data.transaction) {
         await this.handleTransaction(data);
       }
       
-      if (data.account) {
-        await this.handleAccountUpdate(data.account);
-      }
-      
-      // Handle ping - just log it, don't respond
+      // Handle ping
       if (data.ping) {
         logger.debug('Received ping from server');
       }
       
-      // Handle pong responses
+      // Handle pong
       if (data.pong) {
         logger.debug('Received pong from server');
       }
@@ -298,32 +300,28 @@ export class YellowstoneGrpcClient extends EventEmitter {
         return;
       }
       
-      // Check if this is a new token creation
-      const isNewToken = result.logFilter;
+      // Parse transaction to detect token creation
+      const logs = result.meta?.logMessages || [];
+      const hasCreate = logs.some((log: string) => 
+        log.includes('Program log: Instruction: Create') ||
+        log.includes('Program log: Instruction: InitializeMint2')
+      );
       
-      if (isNewToken) {
-        // Look for pump token creation pattern
+      if (hasCreate) {
+        // This is a token creation
         const createdAccounts = this.extractCreatedAccounts(result);
         
         for (const account of createdAccounts) {
-          // Only process pump tokens
           if (account.mint && account.mint.endsWith('pump')) {
             const tokenMint = account.mint;
             const bondingCurve = account.bondingCurve;
-            const creator = result.message.accountKeys[0];
-            
-            // Skip if we're already tracking this token
-            if (this.trackingTokens.has(tokenMint)) {
-              logger.debug(`Already tracking token: ${tokenMint}`);
-              continue;
-            }
             
             const tokenTx: TokenTransaction = {
               signature: result.signature,
               tokenAddress: tokenMint,
               timestamp: new Date(),
               type: 'create',
-              userAddress: creator,
+              userAddress: result.message.accountKeys[0],
               tokenAmount: 0n,
               solAmount: 0n,
               priceUsd: 0,
@@ -333,16 +331,15 @@ export class YellowstoneGrpcClient extends EventEmitter {
               bondingCurve: bondingCurve
             };
             
-            // Track the token and its bonding curve
-            this.trackingTokens.add(tokenMint);
-            if (bondingCurve) {
-              this.bondingCurves.set(tokenMint, bondingCurve);
-              // We'll subscribe to this bonding curve dynamically later
-            }
-            
             this.emit('tokenCreated', tokenTx);
             
             logger.info(`🎉 New pump token created: ${tokenMint}`);
+            
+            // Store the mapping if we found the bonding curve
+            if (bondingCurve) {
+              this.bondingCurveToToken.set(bondingCurve, tokenMint);
+              this.tokenToBondingCurve.set(tokenMint, bondingCurve);
+            }
           }
         }
       } else {
@@ -359,13 +356,11 @@ export class YellowstoneGrpcClient extends EventEmitter {
     const createdAccounts: Array<{mint?: string, bondingCurve?: string}> = [];
     
     try {
-      // Check postTokenBalances for new token mints
       const postTokenBalances = result.meta?.postTokenBalances || [];
       const preTokenBalances = result.meta?.preTokenBalances || [];
+      const accountKeys = result.message.accountKeys || [];
       
-      logger.debug(`Checking token balances - post: ${postTokenBalances.length}, pre: ${preTokenBalances.length}`);
-      
-      // Find new token accounts (exist in post but not in pre)
+      // Find new token accounts
       for (const postBalance of postTokenBalances) {
         const isNew = !preTokenBalances.some((pre: any) => 
           pre.accountIndex === postBalance.accountIndex
@@ -374,17 +369,48 @@ export class YellowstoneGrpcClient extends EventEmitter {
         if (isNew && postBalance.mint) {
           const mint = this.decodeBase58(postBalance.mint);
           
-          logger.debug(`Found new token: ${mint}`);
-          
-          // Filter out system program and non-pump tokens
-          if (!mint.startsWith(SYSTEM_PROGRAM) && 
-              !mint.endsWith('11111111111111111111111112') &&
-              mint.endsWith('pump')) {
+          if (mint.endsWith('pump')) {
+            // Look for bonding curve in the transaction
+            // In Pump.fun create transactions, accounts are typically:
+            // [0] = User/Payer
+            // [1] = Token Mint (the new token)
+            // [2] = Mint Authority
+            // [3] = Bonding Curve (PDA)
+            // [4] = Associated Bonding Curve
+            // [5] = Global State
+            // [6] = MPL Token Metadata Program
+            // [7] = Metadata Account
+            // [8] = System Program
+            // [9] = Token Program
+            // [10] = Associated Token Program
+            // [11] = Rent
+            // [12] = Event Authority
+            // [13] = Program (Pump.fun)
             
-            // Try to find bonding curve from the transaction
-            const bondingCurve = this.findBondingCurveInTransaction(result);
+            let bondingCurve: string | undefined;
             
-            logger.debug(`Token ${mint} bonding curve: ${bondingCurve || 'not found'}`);
+            // Look through account keys for potential bonding curve
+            for (let i = 0; i < accountKeys.length; i++) {
+              const account = accountKeys[i];
+              
+              // Bonding curves are PDAs that:
+              // - Don't end with 'pump'
+              // - Are not system programs
+              // - Are typically at index 3 or 4 in create transactions
+              if (account && 
+                  !account.endsWith('pump') && 
+                  !account.startsWith('1111111') &&
+                  account !== PUMP_FUN_PROGRAM &&
+                  account.length === 44) {
+                
+                // Check if this could be the bonding curve
+                // In create transactions, it's usually one of the first few accounts after the token mint
+                if (i >= 2 && i <= 5) {
+                  bondingCurve = account;
+                  break;
+                }
+              }
+            }
             
             createdAccounts.push({
               mint,
@@ -394,54 +420,145 @@ export class YellowstoneGrpcClient extends EventEmitter {
         }
       }
       
-      // Also check logs for Create instruction with pump program
-      const logs = result.meta?.logMessages || [];
-      const hasPumpCreate = logs.some((log: string) => 
-        log.includes('Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke') &&
-        logs.some((l: string) => l.includes('Instruction: Create'))
-      );
-      
-      if (hasPumpCreate && createdAccounts.length === 0) {
-        logger.debug('Found Create instruction but no token in postTokenBalances, checking account keys...');
-        // Try to extract from account keys
-        const accountKeys = result.message.accountKeys || [];
-        for (const key of accountKeys) {
-          if (key.endsWith('pump') && !this.trackingTokens.has(key)) {
-            logger.debug(`Found pump token in account keys: ${key}`);
-            createdAccounts.push({ mint: key });
-          }
-        }
-      }
-      
     } catch (error) {
       logger.error('Error extracting created accounts:', error);
     }
     
-    logger.debug(`Extracted ${createdAccounts.length} created accounts`);
     return createdAccounts;
   }
   
-  private findBondingCurveInTransaction(result: any): string | undefined {
+  private async handleAccountUpdate(data: any): Promise<void> {
     try {
-      // Look for accounts owned by pump program in the transaction
-      const accountKeys = result.message.accountKeys || [];
+      const dataTx = data.account?.account;
+      if (!dataTx) return;
       
-      // Bonding curves are usually created in the same transaction
-      // Look for accounts that could be bonding curves
-      for (let i = 0; i < accountKeys.length; i++) {
-        const account = accountKeys[i];
-        // Bonding curves have specific patterns, but without parsing the full tx data,
-        // we'll need to wait for account updates to identify them
-        if (account.length === 44 && !account.endsWith('pump') && !account.startsWith(SYSTEM_PROGRAM)) {
-          // This could be a bonding curve - we'll verify when we get account updates
-          return account;
-        }
+      // Decode the account key and owner
+      const accountKey = this.decodeBase58(dataTx.pubkey);
+      const owner = this.decodeBase58(dataTx.owner);
+      
+      // Verify this is a Pump.fun account
+      if (owner !== PUMP_FUN_PROGRAM) return;
+      
+      // Decode the account data
+      const accountData = Buffer.from(dataTx.data);
+      
+      // Parse bonding curve data
+      const bondingCurve = this.parseBondingCurveAccount(accountData, accountKey);
+      
+      if (!bondingCurve) {
+        logger.debug(`Failed to parse bonding curve data for ${accountKey}`);
+        return;
       }
+      
+      logger.info(`📈 Bonding curve update for token ${bondingCurve.tokenMint}`);
+      
+      // Update our mappings
+      this.bondingCurveToToken.set(accountKey, bondingCurve.tokenMint);
+      this.tokenToBondingCurve.set(bondingCurve.tokenMint, accountKey);
+      
+      // Calculate price
+      const priceSol = this.calculatePrice(bondingCurve);
+      const priceUsd = priceSol * this.solPriceUsd;
+      
+      const totalSupply = Number(bondingCurve.tokenTotalSupply) / 1e6;
+      const marketCap = priceUsd * totalSupply;
+      
+      const solInCurve = Number(bondingCurve.realSolReserves) / 1e9;
+      const liquidityUsd = solInCurve * this.solPriceUsd * 2;
+      
+      const priceUpdate: TokenPrice = {
+        tokenAddress: bondingCurve.tokenMint,
+        timestamp: new Date(),
+        priceUsd,
+        priceSol,
+        virtualSolReserves: bondingCurve.virtualSolReserves,
+        virtualTokenReserves: bondingCurve.virtualTokenReserves,
+        realSolReserves: bondingCurve.realSolReserves,
+        realTokenReserves: bondingCurve.realTokenReserves,
+        marketCap,
+        liquidityUsd,
+        slot: data.slot || 0,
+        curveProgress: bondingCurve.curveProgress,
+        isComplete: bondingCurve.complete,
+        totalSupply
+      };
+      
+      this.emit('priceUpdate', priceUpdate);
+      
+      // Update token in database with bonding curve if not already set
+      await this.updateTokenBondingCurve(bondingCurve.tokenMint, accountKey);
+      
+      // Check for near graduation
+      if (bondingCurve.curveProgress && bondingCurve.curveProgress > 80 && !bondingCurve.complete) {
+        this.emit('nearGraduation', {
+          tokenAddress: bondingCurve.tokenMint,
+          progress: bondingCurve.curveProgress,
+          solInCurve
+        });
+      }
+      
     } catch (error) {
-      logger.error('Error finding bonding curve:', error);
+      logger.error('Error handling account update:', error);
+    }
+  }
+  
+  private parseBondingCurveAccount(data: Buffer, bondingCurveAddress: string): BondingCurveAccount | null {
+    try {
+      // Use the structure from Shyft example
+      const decoded = bondingCurveStructure.decode(data);
+      
+      const account: BondingCurveAccount = {
+        discriminator: BigInt(decoded.discriminator),
+        virtualTokenReserves: BigInt(decoded.virtualTokenReserves),
+        virtualSolReserves: BigInt(decoded.virtualSolReserves),
+        realTokenReserves: BigInt(decoded.realTokenReserves),
+        realSolReserves: BigInt(decoded.realSolReserves),
+        tokenTotalSupply: BigInt(decoded.tokenTotalSupply),
+        complete: decoded.complete,
+        tokenMint: decoded.tokenMint.toBase58(),
+        bondingCurveAddress
+      };
+      
+      // Calculate curve progress
+      const realSolInLamports = Number(account.realSolReserves);
+      const targetSolInLamports = 85 * 1e9; // 85 SOL target for graduation
+      account.curveProgress = Math.min((realSolInLamports / targetSolInLamports) * 100, 100);
+      
+      return account;
+    } catch (error) {
+      logger.error('Error parsing bonding curve account:', error);
+      return null;
+    }
+  }
+  
+  private calculatePrice(bondingCurve: BondingCurveAccount): number {
+    if (bondingCurve.virtualTokenReserves === 0n) return 0;
+    
+    const solReserves = Number(bondingCurve.virtualSolReserves) / 1e9;
+    const tokenReserves = Number(bondingCurve.virtualTokenReserves) / 1e6;
+    
+    const price = solReserves / tokenReserves;
+    
+    if (price < 0 || price > 1000000) {
+      logger.warn(`Unusual price calculated: ${price}`);
+      return 0;
     }
     
-    return undefined;
+    return price;
+  }
+  
+  private async updateTokenBondingCurve(tokenAddress: string, bondingCurveAddress: string): Promise<void> {
+    try {
+      await db('tokens')
+        .where('address', tokenAddress)
+        .whereNull('bonding_curve')
+        .update({
+          bonding_curve: bondingCurveAddress,
+          updated_at: new Date()
+        });
+    } catch (error) {
+      logger.debug('Error updating token bonding curve:', error);
+    }
   }
   
   private transformOutput(data: any): any {
@@ -459,7 +576,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
       const instructions = message?.instructions || [];
       const meta = dataTx?.meta;
       
-      // Check logs for token creation
       const logs: string[] = meta?.logMessages || [];
       const logFilter = logs.some(log => 
         log.includes('Instruction: Create') || 
@@ -525,7 +641,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
           // Try to extract token address from the instruction accounts
           let tokenAddress = 'unknown';
           if (instruction.accounts && instruction.accounts.length > 0) {
-            // Usually the token mint is one of the first accounts
             for (const accountIndex of instruction.accounts) {
               const account = result.message.accountKeys[accountIndex];
               if (account && account.endsWith('pump')) {
@@ -557,153 +672,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
     }
   }
   
-  private async handleAccountUpdate(account: any): Promise<void> {
-    try {
-      const accountKey = this.decodeBase58(account.account.pubkey);
-      const owner = this.decodeBase58(account.account.owner);
-      
-      logger.debug(`Account update: ${accountKey} owned by ${owner}`);
-      
-      if (owner !== PUMP_FUN_PROGRAM) return;
-      
-      const data = Buffer.from(account.account.data);
-      
-      logger.debug(`Checking if account ${accountKey} is bonding curve (data length: ${data.length})`);
-      
-      if (!data.slice(0, 8).equals(BONDING_CURVE_DISCRIMINATOR)) {
-        logger.debug(`Account ${accountKey} is not a bonding curve (discriminator mismatch)`);
-        return;
-      }
-      
-      const bondingCurve = this.parseBondingCurveAccount(data);
-      
-      if (!bondingCurve || !bondingCurve.tokenMint) {
-        logger.debug(`Failed to parse bonding curve data for ${accountKey}`);
-        return;
-      }
-      
-      logger.info(`📈 Bonding curve update for token ${bondingCurve.tokenMint}`);
-      
-      // Update our mapping
-      this.bondingCurves.set(bondingCurve.tokenMint, accountKey);
-      
-      const priceSol = this.calculatePrice(bondingCurve);
-      const priceUsd = priceSol * this.solPriceUsd;
-      
-      const totalSupply = Number(bondingCurve.tokenTotalSupply) / 1e6;
-      const marketCap = priceUsd * totalSupply;
-      
-      const solInCurve = Number(bondingCurve.realSolReserves) / 1e9;
-      const liquidityUsd = solInCurve * this.solPriceUsd * 2;
-      
-      logger.debug(`Token ${bondingCurve.tokenMint} - Price: ${priceUsd.toFixed(6)}, MC: ${marketCap.toFixed(2)}, Progress: ${bondingCurve.curveProgress?.toFixed(2)}%`);
-      
-      const priceUpdate: TokenPrice = {
-        tokenAddress: bondingCurve.tokenMint,
-        timestamp: new Date(),
-        priceUsd,
-        priceSol,
-        virtualSolReserves: bondingCurve.virtualSolReserves,
-        virtualTokenReserves: bondingCurve.virtualTokenReserves,
-        realSolReserves: bondingCurve.realSolReserves,
-        realTokenReserves: bondingCurve.realTokenReserves,
-        marketCap,
-        liquidityUsd,
-        slot: account.slot,
-        curveProgress: bondingCurve.curveProgress,
-        isComplete: bondingCurve.complete,
-        totalSupply
-      };
-      
-      this.emit('priceUpdate', priceUpdate);
-      
-      await this.updateTokenMetrics(bondingCurve.tokenMint, {
-        currentPriceUsd: priceUsd,
-        currentPriceSol: priceSol,
-        marketCap,
-        liquidity: solInCurve,
-        curveProgress: bondingCurve.curveProgress,
-        isGraduated: bondingCurve.complete,
-        bondingCurve: accountKey
-      });
-      
-      if (bondingCurve.curveProgress && bondingCurve.curveProgress > 80 && !bondingCurve.complete) {
-        this.emit('nearGraduation', {
-          tokenAddress: bondingCurve.tokenMint,
-          progress: bondingCurve.curveProgress,
-          solInCurve
-        });
-      }
-      
-    } catch (error) {
-      logger.error('Error handling account update:', error);
-    }
-  }
-  
-  private parseBondingCurveAccount(data: Buffer): BondingCurveAccount | null {
-    try {
-      if (data.length < 121) return null;
-      
-      const account: BondingCurveAccount = {
-        discriminator: data.slice(0, 8),
-        virtualTokenReserves: data.readBigUInt64LE(8),
-        virtualSolReserves: data.readBigUInt64LE(16),
-        realTokenReserves: data.readBigUInt64LE(24),
-        realSolReserves: data.readBigUInt64LE(32),
-        tokenTotalSupply: data.readBigUInt64LE(40),
-        complete: data.readUInt8(48) === 1,
-        tokenMint: bs58.encode(data.slice(49, 81)),
-        bondingCurveAddress: bs58.encode(data.slice(81, 113)),
-        bumpSeed: data.readBigUInt64LE(113)
-      };
-
-      const realSolInLamports = Number(account.realSolReserves);
-      const targetSolInLamports = 85 * 1e9;
-      account.curveProgress = Math.min((realSolInLamports / targetSolInLamports) * 100, 100);
-
-      return account;
-    } catch (error) {
-      logger.error('Error parsing bonding curve account:', error);
-      return null;
-    }
-  }
-  
-  private calculatePrice(bondingCurve: BondingCurveAccount): number {
-    if (bondingCurve.virtualTokenReserves === 0n) return 0;
-    
-    const solReserves = Number(bondingCurve.virtualSolReserves) / 1e9;
-    const tokenReserves = Number(bondingCurve.virtualTokenReserves) / 1e6;
-    
-    const price = solReserves / tokenReserves;
-    
-    if (price < 0 || price > 1000000) {
-      logger.warn(`Unusual price calculated: ${price}`);
-      return 0;
-    }
-    
-    return price;
-  }
-  
-  private async updateTokenMetrics(tokenAddress: string, metrics: any): Promise<void> {
-    try {
-      await db('tokens')
-        .where('address', tokenAddress)
-        .update({
-          current_price_usd: metrics.currentPriceUsd,
-          current_price_sol: metrics.currentPriceSol,
-          market_cap: metrics.marketCap,
-          liquidity: metrics.liquidity,
-          curve_progress: metrics.curveProgress,
-          is_graduated: metrics.isGraduated,
-          bonding_curve: metrics.bondingCurve,
-          last_price_update: new Date(),
-          updated_at: new Date()
-        });
-    } catch (error) {
-      logger.error('Error updating token metrics:', error);
-    }
-  }
-  
   async disconnect(): Promise<void> {
     if (this.stream) {
       this.stream.end();
@@ -711,9 +679,8 @@ export class YellowstoneGrpcClient extends EventEmitter {
     }
     
     this.isConnected = false;
-    this.bondingCurves.clear();
-    this.trackingTokens.clear();
-    this.subscribedAccounts.clear();
+    this.bondingCurveToToken.clear();
+    this.tokenToBondingCurve.clear();
     
     logger.info('Disconnected from gRPC');
   }
@@ -728,18 +695,15 @@ export class YellowstoneGrpcClient extends EventEmitter {
   }
   
   async subscribeToBondingCurve(bondingCurveAddress: string): Promise<void> {
-    if (!this.stream || !this.isConnected) {
-      logger.warn('Cannot subscribe to bonding curve - not connected');
-      return;
-    }
-    
-    // For now, we're already subscribing to all pump-owned accounts
-    // In the future, we could dynamically update subscriptions
-    logger.debug(`Tracking bonding curve: ${bondingCurveAddress}`);
-    this.subscribedAccounts.add(bondingCurveAddress);
+    // Not needed anymore as we subscribe to all bonding curves
+    logger.debug(`Bonding curve ${bondingCurveAddress} will be tracked automatically`);
   }
   
   getBondingCurveForToken(tokenAddress: string): string | undefined {
-    return this.bondingCurves.get(tokenAddress);
+    return this.tokenToBondingCurve.get(tokenAddress);
+  }
+  
+  getTokenForBondingCurve(bondingCurve: string): string | undefined {
+    return this.bondingCurveToToken.get(bondingCurve);
   }
 }

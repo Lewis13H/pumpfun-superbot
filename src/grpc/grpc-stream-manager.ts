@@ -1,4 +1,4 @@
-// src/grpc/grpc-stream-manager.ts - V5 with improved token and price handling
+// src/grpc/grpc-stream-manager.ts - V5 Fixed with deduplication and category transitions
 
 import { YellowstoneGrpcClient, TokenPrice, TokenTransaction } from './yellowstone-grpc-client';
 import { Knex } from 'knex';
@@ -292,7 +292,8 @@ export class GrpcStreamManager extends EventEmitter {
             from_category: previousCategory,
             to_category: newCategory,
             market_cap_at_transition: price.marketCap,
-            transitioned_at: new Date()
+            reason: 'market_cap_threshold',
+            created_at: new Date()
           });
         }
       }
@@ -658,8 +659,24 @@ export class GrpcStreamManager extends EventEmitter {
       logger.info(`Created ${missingTokens.length} missing tokens`);
     }
     
+    // Deduplicate prices by token_address and time (keep the latest one)
+    const priceMap = new Map<string, any>();
+    for (const price of this.buffers.prices) {
+      // Create a key using token address and timestamp (rounded to second)
+      const timeKey = new Date(price.timestamp).toISOString().slice(0, 19); // YYYY-MM-DDTHH:mm:ss
+      const key = `${price.tokenAddress}_${timeKey}`;
+      
+      // Keep only the latest price for each token/time combination
+      priceMap.set(key, price);
+    }
+    
+    // Convert deduplicated map back to array
+    const deduplicatedPrices = Array.from(priceMap.values());
+    
+    logger.debug(`Deduplication: ${this.buffers.prices.length} prices reduced to ${deduplicatedPrices.length}`);
+    
     // Now insert price data
-    const insertData = this.buffers.prices.map(price => ({
+    const insertData = deduplicatedPrices.map(price => ({
       token_address: price.tokenAddress,
       time: price.timestamp,
       price_usd: price.priceUsd,
@@ -724,7 +741,7 @@ export class GrpcStreamManager extends EventEmitter {
     logger.info(`💰 Inserted ${successCount} price updates (${errorCount} failures)`);
     
     // Update volume calculations for affected tokens
-    const uniqueTokens = [...new Set(this.buffers.prices.map(p => p.tokenAddress))];
+    const uniqueTokens = [...new Set(deduplicatedPrices.map(p => p.tokenAddress))];
     for (const tokenAddress of uniqueTokens) {
       await this.updateTokenVolume(trx, tokenAddress);
     }
