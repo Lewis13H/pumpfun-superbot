@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { config } from '../config';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 // Add after imports
 interface TokenMetrics {

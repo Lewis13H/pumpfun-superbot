@@ -1,7 +1,7 @@
 // src/api/controllers/market.controller.ts
 import { Request, Response } from 'express';
 import { db } from '../../database/postgres';
-import { logger } from '../../utils/logger';
+import { logger } from '../../utils/logger2';
 
 export class MarketController {
   async getMarketMetrics(req: Request, res: Response) {

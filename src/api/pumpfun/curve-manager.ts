@@ -1,6 +1,6 @@
 // src/api/pumpfun/curve-manager.ts
 import { PublicKey } from '@solana/web3.js';
-import { logger } from '../../utils/logger';
+import { logger } from '../../utils/logger2';
 import { getRateLimitedConnection } from '../../utils/rpc-rate-limiter';
 import type { RateLimitedConnection } from '../../utils/rpc-rate-limiter';
 

@@ -1,6 +1,6 @@
 import { TokenCategory, categoryConfig } from '../config/category-config';
 import { db } from '../database/postgres';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { EventEmitter } from 'events';
 
 export interface BuyCriteria {

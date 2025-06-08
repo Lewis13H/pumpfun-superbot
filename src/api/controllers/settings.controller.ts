@@ -1,6 +1,6 @@
 // src/api/controllers/settings.controller.ts
 import { Request, Response } from 'express';
-import { logger } from '../../utils/logger';
+import { logger } from '../../utils/logger2';
 import fs from 'fs/promises';
 import path from 'path';
 

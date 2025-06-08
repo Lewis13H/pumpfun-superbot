@@ -1,7 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import axios from 'axios';
 import crypto from 'crypto';
-import { logger } from './logger';
+import { logger } from './logger2';
 
 export interface ComprehensiveTokenMetadata {
   // Core identifiers

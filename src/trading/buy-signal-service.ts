@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { buySignalEvaluator, BuyEvaluation } from './buy-signal-evaluator';
 import { positionSizer, PositionSize } from './position-sizer';
 import { categoryManager } from '../category/category-manager';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { db } from '../database/postgres';
 
 export interface BuySignal {

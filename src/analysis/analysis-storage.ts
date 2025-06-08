@@ -1,5 +1,5 @@
 import { db } from '../database/postgres';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 interface TokenAnalysis {
   tokenAddress: string;

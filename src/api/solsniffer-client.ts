@@ -1,6 +1,6 @@
 // src/api/solsniffer-client.ts
 import { BaseAPIClient } from './base-api-client';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 export interface SolSnifferTokenAnalysis {
   address: string;

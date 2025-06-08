@@ -1,6 +1,6 @@
 // src/api/market-metrics.ts
 import { Router } from 'express';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { db } from '../database/postgres';
 import { MarketMetricsAnalyzer } from '../analysis/market-metrics-analyzer';
 

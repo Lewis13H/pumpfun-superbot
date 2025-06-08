@@ -1,7 +1,7 @@
 import { TokenCategory } from '../config/category-config';
 import { ScanTask, ScanResult } from './scan-task.interface';
 import { CategoryAPIRouter } from '../analysis/category-api-router';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 export class ScanHandlers {
   constructor(private apiRouter: CategoryAPIRouter) {}

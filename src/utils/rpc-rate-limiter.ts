@@ -1,6 +1,6 @@
 import { Connection, ConnectionConfig, AccountInfo } from '@solana/web3.js';
 import PQueue from 'p-queue';
-import { logger } from './logger';
+import { logger } from './logger2';
 
 export class RateLimitedConnection extends Connection {
     private queue: PQueue;

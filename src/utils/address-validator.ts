@@ -1,6 +1,6 @@
 // src/utils/address-validator.ts
 import { PublicKey } from '@solana/web3.js';
-import { logger } from './logger';
+import { logger } from './logger2';
 
 export class AddressValidator {
   /**

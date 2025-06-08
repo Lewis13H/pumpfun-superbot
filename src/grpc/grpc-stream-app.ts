@@ -1,13 +1,15 @@
-// src/grpc/grpc-stream-app.ts
+// src/grpc/grpc-stream-app.ts - FINAL VERSION
 
 import { GrpcStreamManager } from './grpc-stream-manager';
 import { db } from '../database/postgres';
 import { CategoryManager } from '../category/category-manager';
 import { BuySignalEvaluator } from '../trading/buy-signal-evaluator';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { config } from '../config';
 import { WebSocketService } from '../websocket/websocket-service';
 import { SOL_PRICE_SERVICE } from '../services/sol-price-service';
+// Import Helius metadata service
+const { HELIUS_METADATA_SERVICE } = require('../services/helius-metadata-service');
 
 export class GrpcStreamApplication {
   private streamManager: GrpcStreamManager;
@@ -16,6 +18,7 @@ export class GrpcStreamApplication {
   private wsService?: WebSocketService;
   private statsInterval?: NodeJS.Timeout;
   private healthCheckInterval?: NodeJS.Timeout;
+  private metadataFixInterval?: NodeJS.Timeout;
   
   constructor() {
     // Initialize without passing db - they'll use their own instances
@@ -40,8 +43,8 @@ export class GrpcStreamApplication {
   
   private setupEventHandlers(): void {
     // Handle new tokens
-    this.streamManager.on('newToken', async (token) => {
-      logger.info(`🎉 New token discovered: ${token.address}`);
+    this.streamManager.on('newToken', async (token: any) => {
+      logger.info(`🎉 New token discovered: ${token.address.substring(0, 8)}... | Metadata fetching...`);
       
       // Broadcast to WebSocket clients
       if (this.wsService) {
@@ -49,20 +52,92 @@ export class GrpcStreamApplication {
       }
     });
     
-    // Handle buy signals
-    this.streamManager.on('buySignal', async ({ token, signal }) => {
-      logger.info(`💰 Buy signal for ${token.symbol}: ${signal.reason}`);
+    // Handle metadata updates from Shyft service
+    this.streamManager.on('metadataUpdated', async (data: any) => {
+      logger.info(`📝 Metadata updated: ${data.tokenAddress.substring(0, 8)}... → ${data.symbol} (${data.name})`);
       
       // Broadcast to WebSocket clients
       if (this.wsService) {
-        this.wsService.broadcast('buySignal', { token, signal });
+        this.wsService.broadcast('metadataUpdated', data);
+      }
+    });
+    
+    // Handle buy signals
+    this.streamManager.on('buySignal', async ({ token, signal }: { token: any; signal: any }) => {
+      // Get updated token symbol for display
+      const tokenData = await db('tokens').where('address', token.address).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...' 
+        ? tokenData.symbol 
+        : token.address.substring(0, 8) + '...';
+      
+      logger.info(`💰 Buy signal for ${displaySymbol}: ${signal.reason}`);
+      
+      // Broadcast to WebSocket clients
+      if (this.wsService) {
+        this.wsService.broadcast('buySignal', { token: tokenData || token, signal });
       }
       
       // Could trigger automated trading here
     });
     
+    // Handle price movements
+    this.streamManager.on('pumpDetected', async (data: any) => {
+      // Get token symbol for better logging
+      const tokenData = await db('tokens').where('address', data.tokenAddress).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...' 
+        ? tokenData.symbol 
+        : data.tokenAddress.substring(0, 8) + '...';
+      
+      logger.info(`🚀 PUMP: ${displaySymbol} +${data.priceChange.toFixed(1)}% | $${data.marketCap.toFixed(0)} MC`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('pumpDetected', { ...data, symbol: displaySymbol });
+      }
+    });
+    
+    this.streamManager.on('dumpDetected', async (data: any) => {
+      // Get token symbol for better logging
+      const tokenData = await db('tokens').where('address', data.tokenAddress).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...' 
+        ? tokenData.symbol 
+        : data.tokenAddress.substring(0, 8) + '...';
+      
+      logger.warn(`📉 DUMP: ${displaySymbol} ${data.priceChange.toFixed(1)}% | $${data.marketCap.toFixed(0)} MC`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('dumpDetected', { ...data, symbol: displaySymbol });
+      }
+    });
+    
+    // Handle graduation events
+    this.streamManager.on('nearGraduation', async (data: any) => {
+      const tokenData = await db('tokens').where('address', data.tokenAddress).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...' 
+        ? tokenData.symbol 
+        : data.tokenAddress.substring(0, 8) + '...';
+      
+      logger.info(`🎓 NEAR GRADUATION: ${displaySymbol} ${data.progress.toFixed(1)}% complete`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('nearGraduation', { ...data, symbol: displaySymbol });
+      }
+    });
+    
+    this.streamManager.on('tokenGraduated', async (data: any) => {
+      const tokenData = await db('tokens').where('address', data.tokenAddress).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...' 
+        ? tokenData.symbol 
+        : data.tokenAddress.substring(0, 8) + '...';
+      
+      logger.info(`🎓 GRADUATED: ${displaySymbol} → Raydium`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('tokenGraduated', { ...data, symbol: displaySymbol });
+      }
+    });
+    
     // Handle errors
-    this.streamManager.on('error', (error) => {
+    this.streamManager.on('error', (error: Error) => {
       logger.error('Stream manager error:', error);
     });
     
@@ -77,7 +152,7 @@ export class GrpcStreamApplication {
   }
   
   async start(): Promise<void> {
-    logger.info('🚀 Starting gRPC Stream Application...');
+    logger.info('🚀 Starting gRPC Stream Application with Shyft Metadata Integration...');
     
     try {
       // Initialize services
@@ -111,11 +186,25 @@ export class GrpcStreamApplication {
       FROM pg_available_extensions 
       WHERE name = 'timescaledb'
     `);
-    logger.info('✅ TimescaleDB version:', tsCheck.rows[0].installed_version);
+    logger.info('✅ TimescaleDB version:', tsCheck.rows[0]?.installed_version || 'Not installed');
     
     // Initialize SOL price service
     await SOL_PRICE_SERVICE.initialize();
     logger.info('✅ SOL price service initialized');
+    
+    // Initialize Shyft metadata service
+    logger.info('✅ Shyft metadata service initialized');
+    
+    // Fix missing metadata on startup (after delay)
+    setTimeout(async () => {
+      try {
+        logger.info('🔧 Starting initial metadata fix...');
+        const fixed = await HELIUS_METADATA_SERVICE.fixMissingMetadata(100);
+        logger.info(`✅ Fixed metadata for ${fixed} tokens on startup`);
+      } catch (error) {
+        logger.error('Error during startup metadata fix:', error);
+      }
+    }, 30000); // After 30 seconds
     
     // Initialize WebSocket service if enabled
     if (config.WEBSOCKET_ENABLED) {
@@ -126,9 +215,10 @@ export class GrpcStreamApplication {
   }
   
   private startPeriodicTasks(): void {
-    // Stats display
+    // Stats display with metadata service stats
     this.statsInterval = setInterval(() => {
       const stats = this.streamManager.getStats();
+      const metadataStats = HELIUS_METADATA_SERVICE.getStats();
       
       logger.info('📊 Stream Statistics:', {
         pricesProcessed: stats.pricesProcessed,
@@ -138,14 +228,34 @@ export class GrpcStreamApplication {
         sellsDetected: stats.sellsDetected,
         errors: stats.errors,
         buffers: stats.bufferSizes,
-        lastFlush: stats.lastFlush
+        lastFlush: stats.lastFlush,
+        metadata: {
+          processing: metadataStats.processingQueue,
+          retrying: metadataStats.retryQueue,
+          requestDelay: metadataStats.requestDelay
+        }
       });
       
       // Broadcast stats to WebSocket clients
       if (this.wsService) {
-        this.wsService.broadcast('stats', stats);
+        this.wsService.broadcast('stats', {
+          ...stats,
+          metadata: metadataStats
+        });
       }
     }, 30000); // Every 30 seconds
+    
+    // Periodic metadata fixing (every 15 minutes)
+    this.metadataFixInterval = setInterval(async () => {
+      try {
+        const fixed = await HELIUS_METADATA_SERVICE.fixMissingMetadata(25);
+        if (fixed > 0) {
+          logger.info(`🔄 Periodic metadata fix: ${fixed} tokens updated`);
+        }
+      } catch (error) {
+        logger.error('Error during periodic metadata fix:', error);
+      }
+    }, 15 * 60 * 1000); // Every 15 minutes
     
     // Health check
     this.healthCheckInterval = setInterval(async () => {
@@ -169,6 +279,7 @@ export class GrpcStreamApplication {
   
   private async checkHealth(): Promise<any> {
     const stats = this.streamManager.getStats();
+    const metadataStats = HELIUS_METADATA_SERVICE.getStats();
     
     // Check database
     let dbHealthy = true;
@@ -182,15 +293,20 @@ export class GrpcStreamApplication {
     const timeSinceLastFlush = Date.now() - stats.lastFlush.getTime();
     const dataFresh = timeSinceLastFlush < 60000; // Less than 1 minute
     
-    const healthy = dbHealthy && stats.grpcConnected && dataFresh;
+    // Check metadata service health
+    const metadataHealthy = metadataStats.processingQueue < 100 && metadataStats.retryQueue < 50;
+    
+    const healthy = dbHealthy && stats.grpcConnected && dataFresh && metadataHealthy;
     
     return {
       healthy,
       dbHealthy,
       grpcConnected: stats.grpcConnected,
       dataFresh,
+      metadataHealthy,
       timeSinceLastFlush,
-      errors: stats.errors
+      errors: stats.errors,
+      metadata: metadataStats
     };
   }
   
@@ -206,6 +322,10 @@ export class GrpcStreamApplication {
         
         if (this.healthCheckInterval) {
           clearInterval(this.healthCheckInterval);
+        }
+        
+        if (this.metadataFixInterval) {
+          clearInterval(this.metadataFixInterval);
         }
         
         // Stop stream manager
@@ -241,6 +361,39 @@ export class GrpcStreamApplication {
       logger.error('Unhandled rejection at:', promise, 'reason:', reason);
       shutdown('unhandledRejection');
     });
+  }
+  
+  // Method to manually trigger metadata fix
+  async fixMissingMetadata(limit: number = 50): Promise<number> {
+    try {
+      logger.info(`🔧 Manually triggering metadata fix for ${limit} tokens...`);
+      const fixed = await HELIUS_METADATA_SERVICE.fixMissingMetadata(limit);
+      logger.info(`✅ Manual metadata fix complete: ${fixed} tokens updated`);
+      return fixed;
+    } catch (error) {
+      logger.error('Error during manual metadata fix:', error);
+      return 0;
+    }
+  }
+  
+  // Get comprehensive system status
+  getSystemStatus() {
+    const streamStats = this.streamManager.getStats();
+    const metadataStats = HELIUS_METADATA_SERVICE.getStats();
+    
+    return {
+      stream: streamStats,
+      metadata: metadataStats,
+      uptime: process.uptime(),
+      memoryUsage: process.memoryUsage(),
+      timestamp: new Date().toISOString()
+    };
+  }
+  
+  // Queue specific token for metadata fetch
+  queueTokenForMetadata(tokenAddress: string): void {
+    HELIUS_METADATA_SERVICE.queueTokenForMetadata(tokenAddress);
+    logger.info(`📝 Manually queued metadata fetch: ${tokenAddress.substring(0, 8)}...`);
   }
 }
 

@@ -1,7 +1,7 @@
 import { db } from '../postgres';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { logger } from '../../utils/logger';
+import { logger } from '../../utils/logger2';
 
 async function runMigration(direction: 'up' | 'down' = 'up') {
   const version = '001_add_category_system';

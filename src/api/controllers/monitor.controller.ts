@@ -1,6 +1,6 @@
 // src/api/controllers/monitor.controller.ts
 import { Request, Response } from 'express';
-import { logger } from '../../utils/logger';
+import { logger } from '../../utils/logger2';
 
 export class MonitorController {
   // Store API metrics in memory (in production, use Redis or database)

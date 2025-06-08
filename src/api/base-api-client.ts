@@ -1,5 +1,5 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 export interface APICallRecord {
   service: string;

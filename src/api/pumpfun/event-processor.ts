@@ -1,7 +1,7 @@
 // src/api/pumpfun/event-processor.ts
 import { PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
-import { logger } from '../../utils/logger';
+import { logger } from '../../utils/logger2';
 
 // IDL types for pump.fun
 interface CreateEventData {

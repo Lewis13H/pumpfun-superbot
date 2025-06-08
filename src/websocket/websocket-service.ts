@@ -2,7 +2,7 @@
 
 import { Server } from 'socket.io';
 import { createServer } from 'http';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 export interface WebSocketClient {
   id: string;

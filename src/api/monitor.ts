@@ -1,6 +1,6 @@
 // src/api/monitor.ts - API Monitor endpoints
 import { Router } from 'express';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 const router = Router();
 

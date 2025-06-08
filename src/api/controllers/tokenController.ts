@@ -1,7 +1,7 @@
 // src/api/controllers/token.controller.ts
 import { Request, Response } from 'express';
 import { db } from '../../database/postgres';
-import { logger } from '../../utils/logger';
+import { logger } from '../../utils/logger2';
 
 export class TokenController {
   async getTokens(req: Request, res: Response) {

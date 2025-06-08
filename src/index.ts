@@ -1,6 +1,6 @@
 // src/index.ts
 import { config } from './config';
-import { logger } from './utils/logger';
+import { logger } from './utils/logger2';
 import { db } from './database/postgres';
 
 async function startApplication() {

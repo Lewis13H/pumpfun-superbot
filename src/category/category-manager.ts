@@ -2,7 +2,7 @@ import { interpret, Interpreter, State } from 'xstate';
 import { TokenCategory, categoryConfig } from '../config/category-config';
 import { createTokenStateMachine, TokenContext, TokenEvent } from './state-machines';
 import { db } from '../database/postgres';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { EventEmitter } from 'events';
 
 // Type for state machine service

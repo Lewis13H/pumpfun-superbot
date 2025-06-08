@@ -1,4 +1,4 @@
-// src/grpc/grpc-stream-manager.ts - V5 Fixed with deduplication and category transitions
+// src/grpc/grpc-stream-manager.ts - FINAL VERSION WITH DETAILED ERROR LOGGING
 
 import { YellowstoneGrpcClient, TokenPrice, TokenTransaction } from './yellowstone-grpc-client';
 import { Knex } from 'knex';
@@ -6,6 +6,7 @@ import { logger } from '../utils/logger';
 import { config } from '../config';
 import { CategoryManager } from '../category/category-manager';
 import { BuySignalEvaluator } from '../trading/buy-signal-evaluator';
+const { HELIUS_METADATA_SERVICE } = require('../services/helius-metadata-service');
 import { EventEmitter } from 'events';
 
 export interface StreamManagerConfig {
@@ -38,7 +39,7 @@ export class GrpcStreamManager extends EventEmitter {
   private db: Knex;
   private categoryManager: CategoryManager;
   private buySignalEvaluator: BuySignalEvaluator;
-  private solPriceUsd: number = 100; // Default SOL price
+  private solPriceUsd: number = 100;
   
   private buffers: BatchBuffers = {
     prices: [],
@@ -58,6 +59,7 @@ export class GrpcStreamManager extends EventEmitter {
   
   private flushTimer?: NodeJS.Timeout;
   private priceChangeTimer?: NodeJS.Timeout;
+  private statsTimer?: NodeJS.Timeout;
   private isRunning = false;
   
   private readonly config: Required<StreamManagerConfig>;
@@ -73,7 +75,7 @@ export class GrpcStreamManager extends EventEmitter {
     this.config = {
       batchSize: 1000,
       flushInterval: 1000,
-      priceChangeInterval: 5 * 60 * 1000, // 5 minutes
+      priceChangeInterval: 5 * 60 * 1000,
       ...config
     };
     
@@ -103,17 +105,15 @@ export class GrpcStreamManager extends EventEmitter {
     // Handle new tokens
     this.grpcClient.on('tokenCreated', async (tx: TokenTransaction) => {
       await this.handleNewToken(tx);
-    });
-    
-    // Handle near graduation events
-    this.grpcClient.on('nearGraduation', (data: any) => {
-      logger.info(`🎓 Token near graduation: ${data.tokenAddress} at ${data.progress.toFixed(2)}%`);
-      this.emit('nearGraduation', data);
+      
+      // Queue for Helius metadata fetch
+      HELIUS_METADATA_SERVICE.queueTokenForMetadata(tx.tokenAddress);
+      logger.info(`📝 Queued metadata fetch for: ${tx.tokenAddress.substring(0, 8)}...`);
     });
     
     // Handle errors
     this.grpcClient.on('error', (error: Error) => {
-      logger.error('gRPC client error:', error);
+      logger.error('gRPC client error:', error.message);
       this.stats.errors++;
       this.emit('error', error);
     });
@@ -159,11 +159,20 @@ export class GrpcStreamManager extends EventEmitter {
       // Connect to gRPC
       await this.grpcClient.connect();
       
-      // Start flush timer
+      // Start timers
       this.flushTimer = setInterval(() => this.flush(), this.config.flushInterval);
-      
-      // Start price change calculator
       this.priceChangeTimer = setInterval(() => this.calculatePriceChanges(), this.config.priceChangeInterval);
+      
+      // Start Helius metadata batch fixing (after 30 seconds)
+      setTimeout(async () => {
+        const fixed = await HELIUS_METADATA_SERVICE.fixMissingMetadata(50);
+        logger.info(`🔧 Fixed metadata for ${fixed} tokens on startup`);
+      }, 30000);
+      
+      // Clean stats display every 2 minutes
+      this.statsTimer = setInterval(() => {
+        this.displayCleanStats();
+      }, 120000);
       
       this.isRunning = true;
       
@@ -192,6 +201,11 @@ export class GrpcStreamManager extends EventEmitter {
       this.priceChangeTimer = undefined;
     }
     
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = undefined;
+    }
+    
     // Flush remaining data
     await this.flush();
     
@@ -206,31 +220,22 @@ export class GrpcStreamManager extends EventEmitter {
   
   private async handlePriceUpdate(price: TokenPrice): Promise<void> {
     try {
-      // Validate token exists
       if (!price.tokenAddress) {
-        logger.warn('Price update missing token address');
         return;
       }
-      
-      logger.debug(`Received price update for ${price.tokenAddress} - Price: ${price.priceUsd.toFixed(6)}, MC: ${price.marketCap.toFixed(2)}`);
-      
-      // Check if token is in the new tokens buffer FIRST
-      const tokenInBuffer = this.buffers.newTokens.has(price.tokenAddress);
       
       // Check if token exists in database
       const tokenExists = await this.db('tokens')
         .where('address', price.tokenAddress)
         .first();
       
-      if (!tokenInBuffer && !tokenExists) {
-        // Token doesn't exist anywhere, create it with price data
-        logger.info(`Creating token ${price.tokenAddress} from price update`);
-        
+      if (!tokenExists) {
+        // Create token if it doesn't exist with placeholder
         await this.db('tokens')
           .insert({
             address: price.tokenAddress,
-            symbol: 'UNKNOWN',
-            name: 'Unknown Token',
+            symbol: 'LOADING...',
+            name: 'Loading...',
             category: 'NEW',
             current_price_usd: price.priceUsd,
             current_price_sol: price.priceSol,
@@ -242,51 +247,45 @@ export class GrpcStreamManager extends EventEmitter {
           })
           .onConflict('address')
           .merge(['current_price_usd', 'current_price_sol', 'market_cap', 'liquidity', 'curve_progress', 'last_price_update']);
-      } else if (tokenExists) {
-        // Update main tokens table immediately with latest metrics
+        
+        // Queue for metadata fetch
+        HELIUS_METADATA_SERVICE.queueTokenForMetadata(price.tokenAddress);
+      } else {
+        // Update existing token
         await this.db('tokens')
           .where('address', price.tokenAddress)
           .update({
             current_price_usd: price.priceUsd,
             current_price_sol: price.priceSol,
             market_cap: price.marketCap,
-            liquidity: price.liquidityUsd / this.solPriceUsd, // Convert USD to SOL
+            liquidity: price.liquidityUsd / this.solPriceUsd,
             curve_progress: price.curveProgress || 0,
             last_price_update: new Date(),
             price_update_count: this.db.raw('price_update_count + 1'),
             updated_at: new Date()
           });
-        
-        logger.debug(`Updated token ${price.tokenAddress} in database`);
-      } else {
-        // Token is in buffer but not in database yet
-        logger.debug(`Token ${price.tokenAddress} is in buffer, will update after flush`);
       }
       
-      // Always add price data to buffer for time-series storage
+      // Add to buffer for time-series storage
       this.buffers.prices.push({
         ...price,
-        // Ensure we have all the data we need
         curveProgress: price.curveProgress || 0,
         totalSupply: price.totalSupply || 0,
         isComplete: price.isComplete || false
       });
       
       this.stats.pricesProcessed++;
-      logger.info(`💰 Price processed for ${price.tokenAddress} - Total processed: ${this.stats.pricesProcessed}`);
       
-      // Check category based on market cap
+      // Check category transitions
       if (tokenExists) {
         const previousCategory = tokenExists.category;
         const newCategory = this.determineCategory(price.marketCap);
         
-        // If category changed, update and log transition
         if (previousCategory && previousCategory !== newCategory) {
           await this.categoryManager.updateTokenCategory(price.tokenAddress, newCategory, price.marketCap);
           
-          logger.info(`📊 Category transition: ${price.tokenAddress} ${previousCategory} → ${newCategory} (MC: ${price.marketCap.toFixed(2)})`);
+          logger.info(`📊 CATEGORY: ${price.tokenAddress.substring(0, 8)}... ${previousCategory} → ${newCategory} ($${price.marketCap.toFixed(0)})`);
           
-          // Track category transition
           await this.db('category_transitions').insert({
             token_address: price.tokenAddress,
             from_category: previousCategory,
@@ -298,31 +297,18 @@ export class GrpcStreamManager extends EventEmitter {
         }
       }
       
-      // Check if we should evaluate for buy signals
+      // Check for buy signals on AIM tokens
       if (price.marketCap >= 35000 && price.marketCap <= 105000) {
-        // Token is in AIM range - evaluate immediately
         await this.evaluateBuySignal(price.tokenAddress, price);
       }
-      
-      // Emit events for specific conditions
-      if (price.curveProgress && price.curveProgress > 80 && !price.isComplete) {
-        this.emit('nearGraduation', {
-          tokenAddress: price.tokenAddress,
-          progress: price.curveProgress,
-          marketCap: price.marketCap
-        });
-      }
-      
-      // Check for rapid price movements (pump detection)
-      await this.checkPriceMovement(price);
       
       // Flush if buffer is full
       if (this.buffers.prices.length >= this.config.batchSize) {
         await this.flush();
       }
       
-    } catch (error) {
-      logger.error('Error handling price update:', error);
+    } catch (error: any) {
+      logger.error('Error handling price update:', error?.message);
       this.stats.errors++;
     }
   }
@@ -336,83 +322,13 @@ export class GrpcStreamManager extends EventEmitter {
     return 'ARCHIVE';
   }
   
-  private async checkPriceMovement(currentPrice: TokenPrice): Promise<void> {
-    try {
-      // Get price from 5 minutes ago
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-      
-      const previousPrice = await this.db('timeseries.token_prices')
-        .where('token_address', currentPrice.tokenAddress)
-        .where('time', '<=', fiveMinutesAgo)
-        .orderBy('time', 'desc')
-        .first();
-      
-      if (previousPrice) {
-        const priceChange = ((currentPrice.priceUsd - previousPrice.price_usd) / previousPrice.price_usd) * 100;
-        
-        // Detect pumps (>20% in 5 minutes)
-        if (priceChange > 20) {
-          logger.info(`🚀 PUMP DETECTED: ${currentPrice.tokenAddress} +${priceChange.toFixed(2)}% in 5 min`);
-          
-          this.emit('pumpDetected', {
-            tokenAddress: currentPrice.tokenAddress,
-            priceChange,
-            previousPrice: previousPrice.price_usd,
-            currentPrice: currentPrice.priceUsd,
-            marketCap: currentPrice.marketCap
-          });
-          
-          // Record pump event
-          await this.db('pump_events').insert({
-            token_address: currentPrice.tokenAddress,
-            event_type: 'PUMP',
-            price_change_percent: priceChange,
-            price_before: previousPrice.price_usd,
-            price_after: currentPrice.priceUsd,
-            market_cap: currentPrice.marketCap,
-            detected_at: new Date()
-          });
-        }
-        
-        // Detect dumps (< -20% in 5 minutes)
-        if (priceChange < -20) {
-          logger.warn(`📉 DUMP DETECTED: ${currentPrice.tokenAddress} ${priceChange.toFixed(2)}% in 5 min`);
-          
-          this.emit('dumpDetected', {
-            tokenAddress: currentPrice.tokenAddress,
-            priceChange,
-            previousPrice: previousPrice.price_usd,
-            currentPrice: currentPrice.priceUsd,
-            marketCap: currentPrice.marketCap
-          });
-          
-          // Record dump event
-          await this.db('pump_events').insert({
-            token_address: currentPrice.tokenAddress,
-            event_type: 'DUMP',
-            price_change_percent: priceChange,
-            price_before: previousPrice.price_usd,
-            price_after: currentPrice.priceUsd,
-            market_cap: currentPrice.marketCap,
-            detected_at: new Date()
-          });
-        }
-      }
-    } catch (error) {
-      logger.error('Error checking price movement:', error);
-    }
-  }
-  
   private async handleTransaction(tx: TokenTransaction): Promise<void> {
     try {
-      // Skip create transactions - they're handled by handleNewToken
       if (tx.type === 'create') {
-        return;
+        return; // Handled by handleNewToken
       }
       
-      // Skip if token address is unknown
       if (tx.tokenAddress === 'unknown') {
-        logger.debug('Skipping transaction with unknown token address');
         return;
       }
       
@@ -430,8 +346,8 @@ export class GrpcStreamManager extends EventEmitter {
         await this.flush();
       }
       
-    } catch (error) {
-      logger.error('Error handling transaction:', error);
+    } catch (error: any) {
+      logger.error('Error handling transaction:', error?.message);
       this.stats.errors++;
     }
   }
@@ -439,26 +355,22 @@ export class GrpcStreamManager extends EventEmitter {
   private async handleNewToken(tx: TokenTransaction): Promise<void> {
     try {
       if (!tx.tokenAddress) {
-        logger.debug('No token address in transaction');
         return;
       }
       
-      // Check if token already exists in database
+      // Check if token already exists
       const exists = await this.db('tokens')
         .where('address', tx.tokenAddress)
         .first();
       
       if (exists) {
-        logger.debug(`Token ${tx.tokenAddress} already exists in database`);
         return;
       }
       
-      logger.debug(`Processing new token ${tx.tokenAddress} with bonding curve: ${tx.bondingCurve}`);
-      
       const newToken: NewToken = {
         address: tx.tokenAddress,
-        symbol: 'UNKNOWN', // Will be updated when we get metadata
-        name: 'Unknown Token',
+        symbol: 'LOADING...',
+        name: 'Loading...',
         bondingCurve: tx.bondingCurve,
         creator: tx.userAddress,
         createdAt: tx.timestamp,
@@ -466,7 +378,7 @@ export class GrpcStreamManager extends EventEmitter {
         discoverySlot: tx.slot
       };
       
-      // Insert the token immediately instead of buffering
+      // Insert token immediately with placeholder metadata
       try {
         await this.db('tokens')
           .insert({
@@ -482,69 +394,49 @@ export class GrpcStreamManager extends EventEmitter {
           .onConflict('address')
           .ignore();
         
-        logger.info(`✅ Immediately inserted new token: ${tx.tokenAddress}`);
+        logger.info(`🆕 NEW TOKEN: ${tx.tokenAddress.substring(0, 8)}... | Metadata loading...`);
         this.stats.newTokensDiscovered++;
-        
-        // Subscribe to the bonding curve for real-time updates if available
-        if (tx.bondingCurve && this.grpcClient.isActive()) {
-          logger.debug(`Subscribing to bonding curve: ${tx.bondingCurve} for token ${tx.tokenAddress}`);
-          await this.grpcClient.subscribeToBondingCurve(tx.bondingCurve);
-        } else {
-          logger.warn(`No bonding curve found for token ${tx.tokenAddress}`);
-        }
         
         this.emit('newToken', newToken);
         
-      } catch (error) {
-        logger.error(`Failed to insert token ${tx.tokenAddress}:`, error);
-        // Fall back to buffering if immediate insert fails
+      } catch (error: any) {
+        logger.error(`Failed to insert token ${tx.tokenAddress}:`, error?.message);
         this.buffers.newTokens.set(tx.tokenAddress, newToken);
       }
       
-    } catch (error) {
-      logger.error('Error handling new token:', error);
+    } catch (error: any) {
+      logger.error('Error handling new token:', error?.message);
       this.stats.errors++;
     }
   }
   
   private async evaluateBuySignal(tokenAddress: string, price: TokenPrice): Promise<void> {
     try {
-      // Get token data from database
       const token = await this.db('tokens')
         .where('address', tokenAddress)
         .first();
       
-      if (!token) {
-        // Token not in database yet, will be evaluated after insertion
+      if (!token || token.buy_attempts >= 3) {
         return;
       }
       
-      // Skip if we've already evaluated recently
-      if (token.buy_attempts >= 3) {
-        return;
-      }
-      
-      // Update token with latest price data
       token.market_cap = price.marketCap;
       token.current_price_usd = price.priceUsd;
       token.liquidity = price.liquidityUsd / this.solPriceUsd;
       
-      // Only evaluate if we have sufficient data
       if (!token.holders || !token.top_10_percent || !token.solsniffer_score) {
-        logger.debug(`Skipping buy evaluation for ${tokenAddress} - insufficient data`);
         return;
       }
       
-      // Evaluate buy signal
       const evaluation = await this.buySignalEvaluator.evaluateToken(token.address);
       
       if (evaluation && evaluation.passed) {
-        logger.info(`💰 Buy signal generated for ${tokenAddress}`);
+        logger.info(`🚨 BUY SIGNAL: ${tokenAddress.substring(0, 8)}... | Signal detected`);
         this.emit('buySignal', { token, evaluation });
       }
       
-    } catch (error) {
-      logger.error('Error evaluating buy signal:', error);
+    } catch (error: any) {
+      // Silent fail for buy signal evaluation
     }
   }
   
@@ -552,25 +444,30 @@ export class GrpcStreamManager extends EventEmitter {
     const startTime = Date.now();
     
     try {
+      logger.info(`🔄 Starting flush with ${this.buffers.prices.length} prices, ${this.buffers.transactions.length} transactions, ${this.buffers.newTokens.size} new tokens`);
+      
       await this.db.transaction(async (trx) => {
-        // Insert new tokens FIRST (if any remain in buffer)
         if (this.buffers.newTokens.size > 0) {
+          logger.info(`📝 Flushing ${this.buffers.newTokens.size} new tokens...`);
           await this.flushNewTokens(trx);
+          logger.info(`✅ New tokens flushed successfully`);
         }
         
-        // Insert prices
         if (this.buffers.prices.length > 0) {
+          logger.info(`📈 Flushing ${this.buffers.prices.length} prices...`);
           await this.flushPrices(trx);
+          logger.info(`✅ Prices flushed successfully`);
         }
         
-        // Insert transactions LAST (after tokens exist)
         if (this.buffers.transactions.length > 0) {
+          logger.info(`💰 Flushing ${this.buffers.transactions.length} transactions...`);
           await this.flushTransactions(trx);
+          logger.info(`✅ Transactions flushed successfully`);
         }
       });
       
       const duration = Date.now() - startTime;
-      logger.debug(`✅ Flush completed in ${duration}ms`);
+      logger.info(`✅ Flush completed successfully in ${duration}ms`);
       
       this.stats.lastFlush = new Date();
       this.emit('flushed', {
@@ -585,11 +482,22 @@ export class GrpcStreamManager extends EventEmitter {
       this.buffers.transactions = [];
       this.buffers.newTokens.clear();
       
-    } catch (error) {
-      logger.error('Error during flush:', error);
+    } catch (error: any) {
+      logger.error('❌ DETAILED FLUSH ERROR:', {
+        message: error?.message || 'No error message',
+        code: error?.code || 'No error code',
+        detail: error?.detail || 'No error detail',
+        hint: error?.hint || 'No error hint',
+        stack: error?.stack || 'No stack trace',
+        bufferSizes: {
+          prices: this.buffers.prices.length,
+          transactions: this.buffers.transactions.length,
+          newTokens: this.buffers.newTokens.size
+        }
+      });
+      
       this.stats.errors++;
       
-      // Don't let flush errors crash the app
       // Clear buffers to prevent memory buildup
       this.buffers.prices = [];
       this.buffers.transactions = [];
@@ -614,226 +522,301 @@ export class GrpcStreamManager extends EventEmitter {
     await trx('tokens')
       .insert(insertData)
       .onConflict('address')
-      .ignore()
-      .returning('*');
-    
-    logger.info(`📝 Inserted ${tokens.length} new tokens`);
+      .ignore();
   }
   
   private async flushPrices(trx: Knex.Transaction): Promise<void> {
     if (this.buffers.prices.length === 0) return;
     
-    // First, ensure all tokens exist in the database
-    const uniqueTokenAddresses = [...new Set(this.buffers.prices.map(p => p.tokenAddress))];
-    
-    // Check which tokens exist
-    const existingTokens = await trx('tokens')
-      .whereIn('address', uniqueTokenAddresses)
-      .pluck('address');
-    
-    const existingTokenSet = new Set(existingTokens);
-    const missingTokens = uniqueTokenAddresses.filter(addr => !existingTokenSet.has(addr));
-    
-    // Insert any missing tokens with minimal data
-    if (missingTokens.length > 0) {
-      logger.warn(`Found ${missingTokens.length} tokens in price buffer that don't exist in database. Creating them...`);
+    try {
+      logger.info(`🔍 Processing ${this.buffers.prices.length} price updates...`);
       
-      const tokensToInsert = missingTokens.map(address => ({
-        address,
-        symbol: 'UNKNOWN',
-        name: 'Unknown Token',
-        category: 'NEW',
-        created_at: new Date(),
-        // Set initial price data from the first price update we have
-        current_price_usd: this.buffers.prices.find(p => p.tokenAddress === address)?.priceUsd || 0,
-        current_price_sol: this.buffers.prices.find(p => p.tokenAddress === address)?.priceSol || 0,
-        market_cap: this.buffers.prices.find(p => p.tokenAddress === address)?.marketCap || 0,
-        last_price_update: new Date()
+      // Ensure all tokens exist in the database
+      const uniqueTokenAddresses = [...new Set(this.buffers.prices.map(p => p.tokenAddress))];
+      logger.info(`🎯 Found ${uniqueTokenAddresses.length} unique token addresses`);
+      
+      const existingTokens = await trx('tokens')
+        .whereIn('address', uniqueTokenAddresses)
+        .pluck('address');
+      
+      const existingTokenSet = new Set(existingTokens);
+      const missingTokens = uniqueTokenAddresses.filter(addr => !existingTokenSet.has(addr));
+      
+      logger.info(`📊 Tokens: ${existingTokens.length} existing, ${missingTokens.length} missing`);
+      
+      // Insert any missing tokens with minimal data
+      if (missingTokens.length > 0) {
+        logger.info(`➕ Inserting ${missingTokens.length} missing tokens...`);
+        
+        const tokensToInsert = missingTokens.map(address => ({
+          address,
+          symbol: 'LOADING...',
+          name: 'Loading...',
+          category: 'NEW',
+          created_at: new Date(),
+          current_price_usd: this.buffers.prices.find(p => p.tokenAddress === address)?.priceUsd || 0,
+          current_price_sol: this.buffers.prices.find(p => p.tokenAddress === address)?.priceSol || 0,
+          market_cap: this.buffers.prices.find(p => p.tokenAddress === address)?.marketCap || 0,
+          last_price_update: new Date()
+        }));
+        
+        await trx('tokens')
+          .insert(tokensToInsert)
+          .onConflict('address')
+          .merge(['current_price_usd', 'current_price_sol', 'market_cap', 'last_price_update']);
+        
+        logger.info(`✅ Missing tokens inserted successfully`);
+      }
+      
+      // Insert price data
+      logger.info(`📊 Preparing price data for time-series insertion...`);
+      
+      const rawInsertData = this.buffers.prices.map(price => ({
+        token_address: price.tokenAddress,
+        time: price.timestamp,
+        price_usd: price.priceUsd,
+        price_sol: price.priceSol,
+        virtual_sol_reserves: price.virtualSolReserves?.toString() || '0',
+        virtual_token_reserves: price.virtualTokenReserves?.toString() || '0',
+        real_sol_reserves: price.realSolReserves?.toString() || '0',
+        real_token_reserves: price.realTokenReserves?.toString() || '0',
+        market_cap: price.marketCap,
+        liquidity_usd: price.liquidityUsd,
+        slot: price.slot,
+        source: 'grpc'
       }));
       
-      await trx('tokens')
-        .insert(tokensToInsert)
-        .onConflict('address')
-        .merge(['current_price_usd', 'current_price_sol', 'market_cap', 'last_price_update']);
+      // CRITICAL: Deduplicate by (token_address, time) to avoid "cannot affect row a second time" error
+      const deduplicatedData = new Map<string, any>();
       
-      logger.info(`Created ${missingTokens.length} missing tokens`);
-    }
-    
-    // Deduplicate prices by token_address and time (keep the latest one)
-    const priceMap = new Map<string, any>();
-    for (const price of this.buffers.prices) {
-      // Create a key using token address and timestamp (rounded to second)
-      const timeKey = new Date(price.timestamp).toISOString().slice(0, 19); // YYYY-MM-DDTHH:mm:ss
-      const key = `${price.tokenAddress}_${timeKey}`;
-      
-      // Keep only the latest price for each token/time combination
-      priceMap.set(key, price);
-    }
-    
-    // Convert deduplicated map back to array
-    const deduplicatedPrices = Array.from(priceMap.values());
-    
-    logger.debug(`Deduplication: ${this.buffers.prices.length} prices reduced to ${deduplicatedPrices.length}`);
-    
-    // Now insert price data
-    const insertData = deduplicatedPrices.map(price => ({
-      token_address: price.tokenAddress,
-      time: price.timestamp,
-      price_usd: price.priceUsd,
-      price_sol: price.priceSol,
-      virtual_sol_reserves: price.virtualSolReserves?.toString() || '0',
-      virtual_token_reserves: price.virtualTokenReserves?.toString() || '0',
-      real_sol_reserves: price.realSolReserves?.toString() || '0',
-      real_token_reserves: price.realTokenReserves?.toString() || '0',
-      market_cap: price.marketCap,
-      liquidity_usd: price.liquidityUsd,
-      slot: price.slot,
-      source: 'grpc'
-    }));
-    
-    // Insert in smaller batches to avoid parameter limit
-    const batchSize = 100;
-    let successCount = 0;
-    let errorCount = 0;
-    
-    for (let i = 0; i < insertData.length; i += batchSize) {
-      const batch = insertData.slice(i, i + batchSize);
-      
-      try {
-        await trx.raw(`
-          INSERT INTO timeseries.token_prices (
-            token_address, time, price_usd, price_sol,
-            virtual_sol_reserves, virtual_token_reserves,
-            real_sol_reserves, real_token_reserves,
-            market_cap, liquidity_usd, slot, source
-          ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',')}
-          ON CONFLICT (token_address, time) DO UPDATE SET
-            price_usd = EXCLUDED.price_usd,
-            price_sol = EXCLUDED.price_sol,
-            market_cap = EXCLUDED.market_cap,
-            liquidity_usd = EXCLUDED.liquidity_usd,
-            virtual_sol_reserves = EXCLUDED.virtual_sol_reserves,
-            virtual_token_reserves = EXCLUDED.virtual_token_reserves,
-            real_sol_reserves = EXCLUDED.real_sol_reserves,
-            real_token_reserves = EXCLUDED.real_token_reserves
-        `, batch.flatMap(d => [
-          d.token_address,
-          d.time,
-          d.price_usd,
-          d.price_sol,
-          d.virtual_sol_reserves,
-          d.virtual_token_reserves,
-          d.real_sol_reserves,
-          d.real_token_reserves,
-          d.market_cap,
-          d.liquidity_usd,
-          d.slot,
-          d.source
-        ]));
+      for (const record of rawInsertData) {
+        const key = `${record.token_address}_${record.time.getTime()}`;
         
-        successCount += batch.length;
-      } catch (error) {
-        logger.error(`Failed to insert batch of ${batch.length} prices:`, error);
-        errorCount += batch.length;
+        // Keep the latest record for each (token_address, time) combination
+        if (!deduplicatedData.has(key) || record.slot > (deduplicatedData.get(key)?.slot || 0)) {
+          deduplicatedData.set(key, record);
+        }
       }
-    }
-    
-    logger.info(`💰 Inserted ${successCount} price updates (${errorCount} failures)`);
-    
-    // Update volume calculations for affected tokens
-    const uniqueTokens = [...new Set(deduplicatedPrices.map(p => p.tokenAddress))];
-    for (const tokenAddress of uniqueTokens) {
-      await this.updateTokenVolume(trx, tokenAddress);
-    }
-  }
-  
-  private async updateTokenVolume(trx: Knex.Transaction, tokenAddress: string): Promise<void> {
-    try {
-      // Calculate 1h and 24h volume from transactions
-      const volumes = await trx('timeseries.token_transactions')
-        .where('token_address', tokenAddress)
-        .select(
-          trx.raw('SUM(CASE WHEN time > NOW() - INTERVAL \'1 hour\' THEN sol_amount::numeric * price_sol::numeric ELSE 0 END) as volume_1h'),
-          trx.raw('SUM(CASE WHEN time > NOW() - INTERVAL \'24 hours\' THEN sol_amount::numeric * price_sol::numeric ELSE 0 END) as volume_24h')
-        )
-        .first();
       
-      if (volumes) {
-        await trx('tokens')
-          .where('address', tokenAddress)
-          .update({
-            volume_1h: volumes.volume_1h || 0,
-            volume_24h: volumes.volume_24h || 0
-          });
+      const insertData = Array.from(deduplicatedData.values());
+      
+      logger.info(`📊 Deduplicated: ${rawInsertData.length} → ${insertData.length} price records (removed ${rawInsertData.length - insertData.length} duplicates)`);
+      
+      if (insertData.length === 0) {
+        logger.info(`⚠️ No price data to insert after deduplication`);
+        return;
       }
-    } catch (error) {
-      logger.error('Error updating token volume:', error);
+      
+      // Insert in batches
+      const batchSize = 50; // Smaller batch size
+      logger.info(`📦 Inserting ${insertData.length} prices in batches of ${batchSize}...`);
+      
+      for (let i = 0; i < insertData.length; i += batchSize) {
+        const batch = insertData.slice(i, i + batchSize);
+        
+        try {
+          logger.info(`📝 Inserting batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(insertData.length/batchSize)} (${batch.length} records)...`);
+          
+          await trx.raw(`
+            INSERT INTO timeseries.token_prices (
+              token_address, time, price_usd, price_sol,
+              virtual_sol_reserves, virtual_token_reserves,
+              real_sol_reserves, real_token_reserves,
+              market_cap, liquidity_usd, slot, source
+            ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',')}
+            ON CONFLICT (token_address, time) DO UPDATE SET
+              price_usd = EXCLUDED.price_usd,
+              price_sol = EXCLUDED.price_sol,
+              market_cap = EXCLUDED.market_cap,
+              liquidity_usd = EXCLUDED.liquidity_usd
+          `, batch.flatMap(d => [
+            d.token_address,
+            d.time,
+            d.price_usd,
+            d.price_sol,
+            d.virtual_sol_reserves,
+            d.virtual_token_reserves,
+            d.real_sol_reserves,
+            d.real_token_reserves,
+            d.market_cap,
+            d.liquidity_usd,
+            d.slot,
+            d.source
+          ]));
+          
+          logger.info(`✅ Batch ${Math.floor(i/batchSize) + 1} inserted successfully`);
+          
+        } catch (batchError: any) {
+          logger.error(`❌ Batch ${Math.floor(i/batchSize) + 1} failed:`, {
+            message: batchError?.message,
+            code: batchError?.code,
+            detail: batchError?.detail,
+            batchSize: batch.length,
+            sampleData: batch[0]
+          });
+          throw batchError; // Re-throw to fail the transaction
+        }
+      }
+      
+      logger.info(`✅ All price batches inserted successfully`);
+      
+    } catch (error: any) {
+      logger.error(`❌ PRICE FLUSH ERROR:`, {
+        message: error?.message || 'No message',
+        code: error?.code || 'No code',
+        detail: error?.detail || 'No detail',
+        priceCount: this.buffers.prices.length
+      });
+      throw error; // Re-throw to fail the transaction
     }
   }
   
   private async flushTransactions(trx: Knex.Transaction): Promise<void> {
     if (this.buffers.transactions.length === 0) return;
     
-    // Filter out transactions with unknown token address
-    const validTransactions = this.buffers.transactions.filter(tx => 
-      tx.tokenAddress && tx.tokenAddress !== 'unknown'
-    );
-    
-    if (validTransactions.length === 0) return;
-    
-    // First, ensure all referenced tokens exist
-    const uniqueTokens = [...new Set(validTransactions.map(tx => tx.tokenAddress))];
-    
-    // Insert any missing tokens with minimal data
-    const missingTokens = uniqueTokens.map(address => ({
-      address,
-      symbol: 'UNKNOWN',
-      name: 'Unknown Token',
-      category: 'NEW',
-      created_at: new Date()
-    }));
-    
-    await trx('tokens')
-      .insert(missingTokens)
-      .onConflict('address')
-      .ignore();
-    
-    // Now insert transactions
-    const insertData = validTransactions.map(tx => ({
-      signature: tx.signature,
-      token_address: tx.tokenAddress,
-      time: tx.timestamp,
-      type: tx.type,
-      user_address: tx.userAddress,
-      token_amount: tx.tokenAmount?.toString() || '0',
-      sol_amount: tx.solAmount?.toString() || '0',
-      price_usd: tx.priceUsd,
-      price_sol: tx.priceSol,
-      slot: tx.slot,
-      fee: tx.fee?.toString() || '0'
-    }));
-    
-    // Insert in smaller batches to avoid parameter limit
-    const batchSize = 100;
-    for (let i = 0; i < insertData.length; i += batchSize) {
-      const batch = insertData.slice(i, i + batchSize);
-      await trx('timeseries.token_transactions')
-        .insert(batch)
-        .onConflict(['signature', 'token_address', 'time'])
-        .ignore();
+    try {
+      logger.info(`💰 Processing ${this.buffers.transactions.length} transactions...`);
+      
+      // Filter out transactions with unknown token address
+      const validTransactions = this.buffers.transactions.filter(tx => 
+        tx.tokenAddress && tx.tokenAddress !== 'unknown'
+      );
+      
+      if (validTransactions.length === 0) {
+        logger.info(`⚠️ No valid transactions to process`);
+        return;
+      }
+      
+      logger.info(`💰 ${validTransactions.length} valid transactions after filtering`);
+      
+      // CRITICAL: Ensure all tokens exist in the database before inserting transactions
+      const uniqueTokenAddresses = [...new Set(validTransactions.map(tx => tx.tokenAddress))];
+      logger.info(`🎯 Found ${uniqueTokenAddresses.length} unique token addresses in transactions`);
+      
+      const existingTokens = await trx('tokens')
+        .whereIn('address', uniqueTokenAddresses)
+        .pluck('address');
+      
+      const existingTokenSet = new Set(existingTokens);
+      const missingTokens = uniqueTokenAddresses.filter(addr => !existingTokenSet.has(addr));
+      
+      logger.info(`📊 Transaction tokens: ${existingTokens.length} existing, ${missingTokens.length} missing`);
+      
+      // Insert any missing tokens with minimal data BEFORE inserting transactions
+      if (missingTokens.length > 0) {
+        logger.info(`➕ Inserting ${missingTokens.length} missing tokens for transactions...`);
+        
+        const tokensToInsert = missingTokens.map(address => {
+          // Find a sample transaction for this token to get some data
+          const sampleTx = validTransactions.find(tx => tx.tokenAddress === address);
+          
+          return {
+            address,
+            symbol: 'LOADING...',
+            name: 'Loading...',
+            category: 'NEW',
+            created_at: sampleTx?.timestamp || new Date(),
+            current_price_usd: sampleTx?.priceUsd || 0,
+            current_price_sol: sampleTx?.priceSol || 0,
+            market_cap: 0,
+            last_price_update: new Date()
+          };
+        });
+        
+        await trx('tokens')
+          .insert(tokensToInsert)
+          .onConflict('address')
+          .merge(['current_price_usd', 'current_price_sol', 'last_price_update']);
+        
+        logger.info(`✅ Missing tokens for transactions inserted successfully`);
+        
+        // Queue missing tokens for metadata fetch
+        for (const tokenAddress of missingTokens) {
+          HELIUS_METADATA_SERVICE.queueTokenForMetadata(tokenAddress);
+          logger.debug(`📝 Queued metadata fetch for transaction token: ${tokenAddress.substring(0, 8)}...`);
+        }
+      }
+      
+      // Now insert transactions (all tokens guaranteed to exist)
+      logger.info(`📊 Preparing transaction data for insertion...`);
+      
+      const insertData = validTransactions.map(tx => ({
+        signature: tx.signature,
+        token_address: tx.tokenAddress,
+        time: tx.timestamp,
+        type: tx.type,
+        user_address: tx.userAddress,
+        token_amount: tx.tokenAmount?.toString() || '0',
+        sol_amount: tx.solAmount?.toString() || '0',
+        price_usd: tx.priceUsd,
+        price_sol: tx.priceSol,
+        slot: tx.slot,
+        fee: tx.fee?.toString() || '0'
+      }));
+      
+      // Insert in batches
+      const batchSize = 50; // Smaller batch size to reduce conflicts
+      logger.info(`📦 Inserting ${insertData.length} transactions in batches of ${batchSize}...`);
+      
+      for (let i = 0; i < insertData.length; i += batchSize) {
+        const batch = insertData.slice(i, i + batchSize);
+        
+        try {
+          logger.info(`📝 Inserting transaction batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(insertData.length/batchSize)} (${batch.length} records)...`);
+          
+          await trx('timeseries.token_transactions')
+            .insert(batch)
+            .onConflict(['signature', 'token_address', 'time'])
+            .ignore();
+          
+          logger.info(`✅ Transaction batch ${Math.floor(i/batchSize) + 1} inserted successfully`);
+          
+        } catch (batchError: any) {
+          logger.error(`❌ Transaction batch ${Math.floor(i/batchSize) + 1} failed:`, {
+            message: batchError?.message,
+            code: batchError?.code,
+            detail: batchError?.detail,
+            batchSize: batch.length,
+            sampleData: batch[0]
+          });
+          throw batchError; // Re-throw to fail the transaction
+        }
+      }
+      
+      logger.info(`✅ All transaction batches inserted successfully`);
+      
+    } catch (error: any) {
+      logger.error(`❌ TRANSACTION FLUSH ERROR:`, {
+        message: error?.message || 'No message',
+        code: error?.code || 'No code',
+        detail: error?.detail || 'No detail',
+        transactionCount: this.buffers.transactions.length
+      });
+      throw error; // Re-throw to fail the transaction
     }
-    
-    logger.debug(`📝 Inserted ${validTransactions.length} transactions`);
   }
   
   private async calculatePriceChanges(): Promise<void> {
     try {
       await this.db.raw('SELECT calculate_price_changes()');
-      logger.info('📊 Price changes calculated');
-    } catch (error) {
-      logger.error('Error calculating price changes:', error);
+    } catch (error: any) {
       this.stats.errors++;
     }
+  }
+  
+  // Clean stats display
+  private displayCleanStats(): void {
+    const heliusStats = HELIUS_METADATA_SERVICE.getStats();
+    
+    console.log('\n' + '='.repeat(60));
+    console.log('🚀 PUMP.FUN BOT STATUS (HELIUS INTEGRATED)');
+    console.log('='.repeat(60));
+    console.log(`📊 Processed: ${this.stats.pricesProcessed} prices | ${this.stats.newTokensDiscovered} new tokens`);
+    console.log(`💰 Activity: ${this.stats.buysDetected} buys | ${this.stats.sellsDetected} sells`);
+    console.log(`📝 Metadata Queue: ${heliusStats.processingQueue} processing | ${heliusStats.retryQueue} retrying`);
+    console.log(`❌ Errors: ${this.stats.errors}`);
+    console.log(`🕐 Last Flush: ${this.stats.lastFlush.toLocaleTimeString()}`);
+    console.log('='.repeat(60) + '\n');
   }
   
   getStats() {
@@ -845,7 +828,8 @@ export class GrpcStreamManager extends EventEmitter {
         newTokens: this.buffers.newTokens.size
       },
       isRunning: this.isRunning,
-      grpcConnected: this.grpcClient.isActive()
+      grpcConnected: this.grpcClient.isActive(),
+      metadata: HELIUS_METADATA_SERVICE.getStats()
     };
   }
 }

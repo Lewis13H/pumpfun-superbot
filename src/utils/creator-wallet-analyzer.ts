@@ -1,5 +1,5 @@
 import { Connection, PublicKey, ParsedTransactionWithMeta } from '@solana/web3.js';
-import { logger } from './logger';
+import { logger } from './logger2';
 import { db } from '../database/postgres';
 
 export interface CreatorWalletAnalysis {

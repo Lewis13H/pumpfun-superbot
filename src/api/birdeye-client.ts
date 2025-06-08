@@ -1,6 +1,6 @@
 // src/api/birdeye-client.ts
 import { BaseAPIClient } from './base-api-client';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import axios, { AxiosInstance } from 'axios';
 
 export interface BirdeyeTokenData {

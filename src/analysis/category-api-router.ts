@@ -5,7 +5,7 @@ import { DexScreenerClient } from '../api/dexscreener-client';
 import { MoralisClient } from '../api/moralis-client';
 import { HeliusClient } from '../api/helius-client';
 import { RaydiumClient } from '../api/raydium-client';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { Config } from '../config';
 import { db } from '../database/postgres';
 

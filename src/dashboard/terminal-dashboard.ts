@@ -4,7 +4,7 @@ import blessed from 'blessed';
 import contrib from 'blessed-contrib';
 import { EventEmitter } from 'events';
 import { db } from '../database/postgres';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { GrpcStreamManager } from '../grpc/grpc-stream-manager';
 
 interface DashboardConfig {

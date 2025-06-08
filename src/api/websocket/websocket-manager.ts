@@ -1,7 +1,7 @@
 // src/api/websocket/websocket-manager.ts
 import { Server } from 'socket.io';
 import { Server as HttpServer } from 'http';
-import { logger } from '../../utils/logger';
+import { logger } from '../../utils/logger2';
 import { db } from '../../database/postgres';
 
 export class WebSocketManager {

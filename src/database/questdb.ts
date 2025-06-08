@@ -1,5 +1,5 @@
 import { config } from '../config';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 // Temporarily stub out QuestDB until we figure out the correct API
 export async function getQuestDBSender(): Promise<any> {

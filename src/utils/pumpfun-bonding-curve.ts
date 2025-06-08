@@ -1,7 +1,7 @@
 // src/utils/pumpfun-bonding-curve.ts
 
 import { PUMP_FUN_CONSTANTS } from '../constants/pumpfun-constants';
-import { logger } from './logger';
+import { logger } from './logger2';
 
 export interface BondingCurveState {
   marketCapUSD: number;

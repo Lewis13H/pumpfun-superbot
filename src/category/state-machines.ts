@@ -1,6 +1,6 @@
 import { createMachine, assign, StateMachine } from 'xstate';
 import { TokenCategory, categoryConfig } from '../config/category-config';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 // Context for token state machine
 export interface TokenContext {

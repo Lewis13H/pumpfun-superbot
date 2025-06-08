@@ -1,11 +1,14 @@
-// src/grpc/yellowstone-grpc-client.ts - V3 with proper bonding curve subscription
+// src/grpc/yellowstone-grpc-client.ts - FINAL VERSION WITH SHYFT METADATA
 
 import { EventEmitter } from 'events';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { db } from '../database/postgres';
 import { struct, bool, u64, u8, publicKey } from '@coral-xyz/borsh';
+import { PublicKey } from '@solana/web3.js';
+// Import Helius metadata service
+const { HELIUS_METADATA_SERVICE } = require('../services/helius-metadata-service');
 
-// Fix for bs58 - it exports as { default: { encode, decode } }
+// Fix for bs58
 const bs58 = require('bs58').default;
 
 // Use require for yellowstone-grpc
@@ -14,7 +17,7 @@ const Client = YellowstoneGrpc.default;
 
 // Pump.fun constants
 const PUMP_FUN_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
-const SYSTEM_PROGRAM = '11111111111111111111111111111111';
+const MIGRATION_AUTHORITY = '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg';
 const BONDING_CURVE_DISCRIMINATOR = Buffer.from([23, 43, 44, 206, 33, 208, 132, 4]);
 const CREATE_DISCRIMINATORS = [181, 234]; // 0xb5 = 181, 0xea = 234  
 const BUY_DISCRIMINATOR = 102; // 0x66
@@ -32,6 +35,7 @@ const bondingCurveStructure = struct([
   publicKey("tokenMint")
 ]);
 
+// Export interfaces
 export interface YellowstoneConfig {
   endpoint: string;
   token: string;
@@ -94,6 +98,14 @@ export class YellowstoneGrpcClient extends EventEmitter {
   private bondingCurveToToken: Map<string, string> = new Map(); // bondingCurve -> tokenMint
   private tokenToBondingCurve: Map<string, string> = new Map(); // tokenMint -> bondingCurve
   
+  // Simplified stats (removed complex metadata tracking)
+  private stats = {
+    transactionsProcessed: 0,
+    createTransactions: 0,
+    accountUpdates: 0,
+    errors: 0
+  }
+  
   constructor(config: YellowstoneConfig) {
     super();
     
@@ -109,18 +121,31 @@ export class YellowstoneGrpcClient extends EventEmitter {
       : `https://${cleanEndpoint}`;
     const cleanToken = this.config.token.trim().replace(/['"]/g, '');
     
-    logger.info('Creating Yellowstone client:', {
+    logger.info('🔌 Connecting to gRPC:', {
       endpoint: endpointWithProtocol,
       tokenLength: cleanToken.length
     });
     
     try {
       this.client = new Client(endpointWithProtocol, cleanToken, undefined);
-      logger.info('✅ Client created successfully');
+      logger.info('✅ gRPC client created successfully');
     } catch (error) {
       logger.error('Failed to create client:', error);
       throw error;
     }
+    
+    // Log stats every 5 minutes
+    setInterval(() => {
+      const shyftStats = HELIUS_METADATA_SERVICE.getStats();
+      logger.info('📊 CLIENT STATS:', {
+        '🎉 New Tokens': this.stats.createTransactions,
+        '📈 Price Updates': this.stats.accountUpdates,
+        '💰 Transactions': this.stats.transactionsProcessed,
+        '❌ Errors': this.stats.errors,
+        '📝 Metadata Queue': shyftStats.processingQueue,
+        '🔄 Metadata Retries': shyftStats.retryQueue
+      });
+    }, 300000); // Every 5 minutes
   }
   
   async connect(): Promise<void> {
@@ -138,6 +163,7 @@ export class YellowstoneGrpcClient extends EventEmitter {
       await this.sendSubscriptionRequest();
       
       this.isConnected = true;
+      this.reconnectAttempts = 0;
       
       logger.info('✅ Connected to Yellowstone gRPC');
       this.emit('connected');
@@ -204,7 +230,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
       try {
         this.stream = null;
         await this.connect();
-        this.reconnectAttempts = 0;
       } catch (error) {
         logger.error('Reconnection failed:', error);
       }
@@ -216,7 +241,7 @@ export class YellowstoneGrpcClient extends EventEmitter {
     const request = {
       slots: {},
       accounts: {
-        // Subscribe to all Pump bonding curve accounts that are not complete
+        // Subscribe to all Pump bonding curve accounts
         pumpBondingCurves: {
           account: [],
           filters: [{
@@ -229,12 +254,20 @@ export class YellowstoneGrpcClient extends EventEmitter {
         }
       },
       transactions: {
-        // Also subscribe to transactions to catch token creations
+        // Pump.fun transactions
         pumpFun: {
           vote: false,
           failed: false,
           signature: undefined,
           accountInclude: [PUMP_FUN_PROGRAM],
+          accountExclude: [],
+          accountRequired: []
+        },
+        // Migration transactions
+        migration: {
+          vote: false,
+          failed: false,
+          accountInclude: [MIGRATION_AUTHORITY],
           accountExclude: [],
           accountRequired: []
         }
@@ -269,11 +302,13 @@ export class YellowstoneGrpcClient extends EventEmitter {
       
       // Handle account updates (bonding curves)
       if (data.account) {
+        this.stats.accountUpdates++;
         await this.handleAccountUpdate(data);
       }
       
       // Handle transactions
       if (data.transaction) {
+        this.stats.transactionsProcessed++;
         await this.handleTransaction(data);
       }
       
@@ -300,48 +335,43 @@ export class YellowstoneGrpcClient extends EventEmitter {
         return;
       }
       
+      // Check for migration
+      if (this.isMigrationTransaction(result)) {
+        await this.handleMigrationTransaction(result, data.transaction?.slot || 0);
+        return;
+      }
+      
       // Parse transaction to detect token creation
       const logs = result.meta?.logMessages || [];
-      const hasCreate = logs.some((log: string) => 
-        log.includes('Program log: Instruction: Create') ||
-        log.includes('Program log: Instruction: InitializeMint2')
+      
+      // Enhanced create detection
+      const hasCreateLog = logs.some((log: string) => 
+        log.includes('Program log: Instruction: Create') && 
+        log.includes('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P') // Must be from Pump.fun program
+      ) || logs.some((log: string) => 
+        log.includes('InitializeMint') &&
+        !log.includes('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL') // Not just associated token creation
       );
       
-      if (hasCreate) {
-        // This is a token creation
-        const createdAccounts = this.extractCreatedAccounts(result);
+      // ALSO check for actual Pump.fun CREATE instructions in the transaction data
+      const hasPumpFunCreateInstruction = result.message?.instructions?.some((instruction: any) => {
+        const programId = result.message.accountKeys[instruction.programIdIndex];
+        if (programId !== PUMP_FUN_PROGRAM) return false;
         
-        for (const account of createdAccounts) {
-          if (account.mint && account.mint.endsWith('pump')) {
-            const tokenMint = account.mint;
-            const bondingCurve = account.bondingCurve;
-            
-            const tokenTx: TokenTransaction = {
-              signature: result.signature,
-              tokenAddress: tokenMint,
-              timestamp: new Date(),
-              type: 'create',
-              userAddress: result.message.accountKeys[0],
-              tokenAmount: 0n,
-              solAmount: 0n,
-              priceUsd: 0,
-              priceSol: 0,
-              slot: data.transaction?.slot || 0,
-              fee: BigInt(result.meta?.fee || 0),
-              bondingCurve: bondingCurve
-            };
-            
-            this.emit('tokenCreated', tokenTx);
-            
-            logger.info(`🎉 New pump token created: ${tokenMint}`);
-            
-            // Store the mapping if we found the bonding curve
-            if (bondingCurve) {
-              this.bondingCurveToToken.set(bondingCurve, tokenMint);
-              this.tokenToBondingCurve.set(tokenMint, bondingCurve);
-            }
-          }
-        }
+        const data = Buffer.from(instruction.data);
+        const discriminator = data[0];
+        return CREATE_DISCRIMINATORS.includes(discriminator);
+      }) || false;
+      
+      const hasCreate = hasCreateLog || hasPumpFunCreateInstruction;
+      
+      if (hasCreate) {
+        this.stats.createTransactions++;
+        
+        logger.info(`🎉 Token creation detected: ${result.signature.substring(0, 8)}...`);
+        
+        // SIMPLIFIED: Extract token address and queue for Shyft metadata
+        await this.extractTokenAndQueueMetadata(result, data.transaction?.slot || 0);
       } else {
         // Parse buy/sell transactions
         await this.parseTransaction(result, data.transaction?.slot || 0);
@@ -352,79 +382,175 @@ export class YellowstoneGrpcClient extends EventEmitter {
     }
   }
   
-  private extractCreatedAccounts(result: any): Array<{mint?: string, bondingCurve?: string}> {
-    const createdAccounts: Array<{mint?: string, bondingCurve?: string}> = [];
-    
+  // SIMPLIFIED: Extract token address and delegate metadata to Shyft API
+  private async extractTokenAndQueueMetadata(result: any, slot: number): Promise<void> {
     try {
-      const postTokenBalances = result.meta?.postTokenBalances || [];
-      const preTokenBalances = result.meta?.preTokenBalances || [];
+      const signature = result.signature;
       const accountKeys = result.message.accountKeys || [];
       
-      // Find new token accounts
+      // Find the token mint and bonding curve
+      let tokenMint = '';
+      let bondingCurve = '';
+      
+      // Method 1: Check post token balances for new mints
+      const postTokenBalances = result.meta?.postTokenBalances || [];
+      const preTokenBalances = result.meta?.preTokenBalances || [];
+      
       for (const postBalance of postTokenBalances) {
         const isNew = !preTokenBalances.some((pre: any) => 
           pre.accountIndex === postBalance.accountIndex
         );
         
         if (isNew && postBalance.mint) {
-          const mint = this.decodeBase58(postBalance.mint);
+          tokenMint = this.decodeBase58(postBalance.mint);
+          logger.info(`✅ Found token mint: ${tokenMint.substring(0, 8)}...`);
+          break;
+        }
+      }
+      
+      // Method 2: Parse instruction accounts if no mint found
+      if (!tokenMint) {
+        for (let instIndex = 0; instIndex < (result.message?.instructions || []).length; instIndex++) {
+          const instruction = result.message.instructions[instIndex];
+          const programId = result.message.accountKeys[instruction.programIdIndex];
           
-          if (mint.endsWith('pump')) {
-            // Look for bonding curve in the transaction
-            // In Pump.fun create transactions, accounts are typically:
-            // [0] = User/Payer
-            // [1] = Token Mint (the new token)
-            // [2] = Mint Authority
-            // [3] = Bonding Curve (PDA)
-            // [4] = Associated Bonding Curve
-            // [5] = Global State
-            // [6] = MPL Token Metadata Program
-            // [7] = Metadata Account
-            // [8] = System Program
-            // [9] = Token Program
-            // [10] = Associated Token Program
-            // [11] = Rent
-            // [12] = Event Authority
-            // [13] = Program (Pump.fun)
-            
-            let bondingCurve: string | undefined;
-            
-            // Look through account keys for potential bonding curve
-            for (let i = 0; i < accountKeys.length; i++) {
-              const account = accountKeys[i];
-              
-              // Bonding curves are PDAs that:
-              // - Don't end with 'pump'
-              // - Are not system programs
-              // - Are typically at index 3 or 4 in create transactions
-              if (account && 
-                  !account.endsWith('pump') && 
-                  !account.startsWith('1111111') &&
-                  account !== PUMP_FUN_PROGRAM &&
-                  account.length === 44) {
+          if (programId !== PUMP_FUN_PROGRAM) continue;
+          
+          const data = Buffer.from(instruction.data);
+          const discriminator = data[0];
+          
+          if (CREATE_DISCRIMINATORS.includes(discriminator)) {
+            if (instruction.accounts && instruction.accounts.length > 0) {
+              for (let i = 0; i < instruction.accounts.length; i++) {
+                const accountIndex = instruction.accounts[i];
+                const account = accountKeys[accountIndex];
                 
-                // Check if this could be the bonding curve
-                // In create transactions, it's usually one of the first few accounts after the token mint
-                if (i >= 2 && i <= 5) {
-                  bondingCurve = account;
+                if (account && 
+                    !account.startsWith('1111111') && 
+                    account !== PUMP_FUN_PROGRAM &&
+                    account.length === 44) {
+                  
+                  // Try this as token mint
+                  tokenMint = account;
+                  logger.info(`✅ Found token mint from instruction: ${tokenMint.substring(0, 8)}...`);
                   break;
                 }
               }
+              
+              // Find bonding curve (usually index 4)
+              if (instruction.accounts.length > 4) {
+                const bondingCurveIndex = instruction.accounts[4];
+                bondingCurve = accountKeys[bondingCurveIndex] || '';
+              }
             }
-            
-            createdAccounts.push({
-              mint,
-              bondingCurve
-            });
+            break;
           }
         }
       }
       
-    } catch (error) {
-      logger.error('Error extracting created accounts:', error);
+      if (!tokenMint) {
+        logger.error(`❌ CRITICAL: Could not find token mint in transaction ${signature.substring(0, 8)}...`);
+        return;
+      }
+      
+      // Store mappings
+      if (bondingCurve) {
+        this.bondingCurveToToken.set(bondingCurve, tokenMint);
+        this.tokenToBondingCurve.set(tokenMint, bondingCurve);
+      }
+      
+      // Check if token exists before emitting creation event
+      const tokenExists = await db('tokens').where('address', tokenMint).first();
+      
+      if (!tokenExists) {
+        // Create token with placeholder metadata
+        await db('tokens')
+          .insert({
+            address: tokenMint,
+            symbol: 'LOADING...',
+            name: 'Loading...',
+            category: 'NEW',
+            bonding_curve: bondingCurve || null,
+            created_at: new Date(),
+            discovery_signature: result.signature,
+            discovery_slot: slot
+          })
+          .onConflict('address')
+          .ignore();
+        
+        // QUEUE FOR SHYFT METADATA FETCH
+        HELIUS_METADATA_SERVICE.queueTokenForMetadata(tokenMint);
+        
+        logger.info(`🚀 NEW TOKEN QUEUED: ${tokenMint.substring(0, 8)}... → Metadata fetching...`);
+        
+        // Subscribe to bonding curve
+        if (bondingCurve && this.isActive()) {
+          await this.subscribeToBondingCurve(bondingCurve);
+        }
+        
+        const tokenTx: TokenTransaction = {
+          signature: result.signature,
+          tokenAddress: tokenMint,
+          timestamp: new Date(),
+          type: 'create',
+          userAddress: accountKeys[0] || '',
+          tokenAmount: 0n,
+          solAmount: 0n,
+          priceUsd: 0,
+          priceSol: 0,
+          slot,
+          fee: BigInt(result.meta?.fee || 0),
+          bondingCurve
+        };
+        
+        this.emit('tokenCreated', tokenTx);
+      }
+      
+    } catch (error: any) {
+      logger.error('Error in simplified metadata extraction:', error?.message);
+      this.stats.errors++;
+    }
+  }
+  
+  private isMigrationTransaction(result: any): boolean {
+    const logs = result.meta?.logMessages || [];
+    return logs.some((log: string) => 
+      log.includes('initialize2') || 
+      log.includes('Program log: Instruction: Migrate')
+    );
+  }
+  
+  private async handleMigrationTransaction(result: any, slot: number): Promise<void> {
+    // Extract token mint from the transaction
+    let tokenMint = '';
+    let raydiumPool = '';
+    
+    // Look for the mint in post token balances
+    const postTokenBalances = result.meta?.postTokenBalances || [];
+    if (postTokenBalances.length > 0) {
+      tokenMint = postTokenBalances[0].mint;
     }
     
-    return createdAccounts;
+    // The pool address is typically in the account keys
+    const accountKeys = result.message.accountKeys || [];
+    for (const key of accountKeys) {
+      if (key.startsWith('5') || key.startsWith('6')) { // Common Raydium pool prefixes
+        raydiumPool = key;
+        break;
+      }
+    }
+    
+    if (tokenMint) {
+      this.emit('tokenGraduated', {
+        signature: result.signature,
+        tokenAddress: tokenMint,
+        raydiumPool,
+        timestamp: new Date(),
+        slot
+      });
+      
+      logger.info(`🎓 Token graduated to Raydium: ${tokenMint.substring(0, 8)}...`);
+    }
   }
   
   private async handleAccountUpdate(data: any): Promise<void> {
@@ -446,11 +572,8 @@ export class YellowstoneGrpcClient extends EventEmitter {
       const bondingCurve = this.parseBondingCurveAccount(accountData, accountKey);
       
       if (!bondingCurve) {
-        logger.debug(`Failed to parse bonding curve data for ${accountKey}`);
         return;
       }
-      
-      logger.info(`📈 Bonding curve update for token ${bondingCurve.tokenMint}`);
       
       // Update our mappings
       this.bondingCurveToToken.set(accountKey, bondingCurve.tokenMint);
@@ -576,13 +699,6 @@ export class YellowstoneGrpcClient extends EventEmitter {
       const instructions = message?.instructions || [];
       const meta = dataTx?.meta;
       
-      const logs: string[] = meta?.logMessages || [];
-      const logFilter = logs.some(log => 
-        log.includes('Instruction: Create') || 
-        log.includes('MintTo') ||
-        log.includes('InitializeMint')
-      );
-      
       return {
         signature,
         message: {
@@ -591,8 +707,7 @@ export class YellowstoneGrpcClient extends EventEmitter {
           recentBlockhash,
           instructions
         },
-        meta,
-        logFilter
+        meta
       };
     } catch (error) {
       logger.error('Error transforming output:', error);
@@ -696,7 +811,7 @@ export class YellowstoneGrpcClient extends EventEmitter {
   
   async subscribeToBondingCurve(bondingCurveAddress: string): Promise<void> {
     // Not needed anymore as we subscribe to all bonding curves
-    logger.debug(`Bonding curve ${bondingCurveAddress} will be tracked automatically`);
+    logger.debug(`Bonding curve ${bondingCurveAddress.substring(0, 8)}... will be tracked automatically`);
   }
   
   getBondingCurveForToken(tokenAddress: string): string | undefined {
@@ -705,5 +820,13 @@ export class YellowstoneGrpcClient extends EventEmitter {
   
   getTokenForBondingCurve(bondingCurve: string): string | undefined {
     return this.bondingCurveToToken.get(bondingCurve);
+  }
+  
+  // Get stats including Shyft metadata service
+  getStats() {
+    return {
+      ...this.stats,
+      metadata: HELIUS_METADATA_SERVICE.getStats()
+    };
   }
 }

@@ -1,5 +1,5 @@
 import { BaseAPIClient } from './base-api-client';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import axios from 'axios';
 
 export interface TokenHolder {

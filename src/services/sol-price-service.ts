@@ -1,7 +1,7 @@
 // src/services/sol-price-service.ts
 
 import axios from 'axios';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { config } from '../config';
 import { EventEmitter } from 'events';
 

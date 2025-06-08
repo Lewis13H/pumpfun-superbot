@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import knex from 'knex';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 export const db = knex({
   client: 'pg',

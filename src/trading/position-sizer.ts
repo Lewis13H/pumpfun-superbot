@@ -1,6 +1,6 @@
 import { categoryConfig } from '../config/category-config';
 import { BuyEvaluation } from './buy-signal-evaluator';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 export interface PositionSize {
   basePosition: number;

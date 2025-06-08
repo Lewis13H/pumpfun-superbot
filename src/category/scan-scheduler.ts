@@ -3,7 +3,7 @@ import { TokenCategory, categoryConfig } from '../config/category-config';
 import { ScanTask, ScanResult, ScanSchedule } from './scan-task.interface';
 import { categoryManager } from './category-manager';
 import { db } from '../database/postgres';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import * as cron from 'node-cron';
 
 export class ScanScheduler extends EventEmitter {

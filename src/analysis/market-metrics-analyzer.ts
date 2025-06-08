@@ -1,6 +1,6 @@
 // src/analysis/market-metrics-analyzer.ts
 import { EventEmitter } from 'events';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { db } from '../database/postgres';
 import { config } from '../config';
 
