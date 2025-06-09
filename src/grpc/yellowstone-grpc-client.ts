@@ -6,7 +6,8 @@ import { db } from '../database/postgres';
 import { struct, bool, u64, u8, publicKey } from '@coral-xyz/borsh';
 import { PublicKey } from '@solana/web3.js';
 // Import Helius metadata service
-const { HELIUS_METADATA_SERVICE } = require('../services/helius-metadata-service');
+const { HELIUS_METADATA_SERVICE } = require('../services/multi-source-metadata-service');
+//const { db } = require('../database/postgres-js');
 
 // Fix for bs58
 const bs58 = require('bs58').default;
@@ -503,7 +504,8 @@ export class YellowstoneGrpcClient extends EventEmitter {
           bondingCurve
         };
         
-        this.emit('tokenCreated', tokenTx);
+        this.emit('tokenCreated', tokenTx); // Triggers handleNewToken()
+        this.emit('transaction', tokenTx);   // 🔧 ADD THIS LINE - Triggers handleTransaction()
       }
       
     } catch (error: any) {

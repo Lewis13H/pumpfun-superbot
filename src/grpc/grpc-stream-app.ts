@@ -9,7 +9,7 @@ import { config } from '../config';
 import { WebSocketService } from '../websocket/websocket-service';
 import { SOL_PRICE_SERVICE } from '../services/sol-price-service';
 // Import Helius metadata service
-const { HELIUS_METADATA_SERVICE } = require('../services/helius-metadata-service');
+const { HELIUS_METADATA_SERVICE } = require('../services/multi-source-metadata-service');
 
 export class GrpcStreamApplication {
   private streamManager: GrpcStreamManager;

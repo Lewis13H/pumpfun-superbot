@@ -6,7 +6,7 @@ import { logger } from '../utils/logger';
 import { config } from '../config';
 import { CategoryManager } from '../category/category-manager';
 import { BuySignalEvaluator } from '../trading/buy-signal-evaluator';
-const { HELIUS_METADATA_SERVICE } = require('../services/helius-metadata-service');
+const { HELIUS_METADATA_SERVICE } = require('../services/multi-source-metadata-service');
 import { EventEmitter } from 'events';
 
 export interface StreamManagerConfig {
@@ -324,9 +324,9 @@ export class GrpcStreamManager extends EventEmitter {
   
   private async handleTransaction(tx: TokenTransaction): Promise<void> {
     try {
-      if (tx.type === 'create') {
-        return; // Handled by handleNewToken
-      }
+      //if (tx.type === 'create') {
+        //return; // Handled by handleNewToken
+      //}
       
       if (tx.tokenAddress === 'unknown') {
         return;
@@ -339,6 +339,10 @@ export class GrpcStreamManager extends EventEmitter {
         this.stats.buysDetected++;
       } else if (tx.type === 'sell') {
         this.stats.sellsDetected++;
+      } else if (tx.type === 'create') {
+        // CREATE transactions are already counted in newTokensDiscovered
+        // but we still want them in the transaction history
+        logger.debug(`📝 CREATE transaction added to buffer: ${tx.tokenAddress?.substring(0, 8)}...`);
       }
       
       // Flush if buffer is full
