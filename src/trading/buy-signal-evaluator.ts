@@ -1,7 +1,13 @@
+// src/trading/buy-signal-evaluator.ts - ENHANCED WITH LIQUIDITY QUALITY SCORING
+
 import { TokenCategory, categoryConfig } from '../config/category-config';
 import { db } from '../database/postgres';
 import { logger } from '../utils/logger2';
 import { EventEmitter } from 'events';
+
+// Import new liquidity services
+import { LIQUIDITY_QUALITY_SCORER, LiquidityQualityScore } from '../services/liquidity-quality-scorer';
+import { LIQUIDITY_GROWTH_TRACKER, LiquidityGrowthMetrics } from '../services/liquidity-growth-tracker';
 
 export interface BuyCriteria {
   marketCap: boolean;
@@ -9,6 +15,9 @@ export interface BuyCriteria {
   holders: boolean;
   concentration: boolean;
   solsniffer: boolean;
+  // NEW: Liquidity quality criteria
+  liquidityQuality: boolean;
+  liquidityGrowth: boolean;
 }
 
 export interface BuyEvaluation {
@@ -22,6 +31,10 @@ export interface BuyEvaluation {
   top10Percent: number;
   solsnifferScore: number;
   
+  // NEW: Enhanced liquidity metrics
+  liquidityQualityScore?: LiquidityQualityScore;
+  liquidityGrowthMetrics?: LiquidityGrowthMetrics;
+  
   // Criteria results
   criteria: BuyCriteria;
   
@@ -30,16 +43,17 @@ export interface BuyEvaluation {
   failureReasons: string[];
   confidence: number;
   
-  // Position sizing
+  // Enhanced position sizing
   recommendedPosition?: number;
   positionLimitFactors?: string[];
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
 }
 
 export class BuySignalEvaluator extends EventEmitter {
   private readonly criteria = categoryConfig.buySignalCriteria;
   
   /**
-   * Evaluate a token for buy signal
+   * ENHANCED: Evaluate a token for buy signal with liquidity quality
    */
   async evaluateToken(tokenAddress: string): Promise<BuyEvaluation> {
     const startTime = Date.now();
@@ -71,27 +85,43 @@ export class BuySignalEvaluator extends EventEmitter {
           holders: false,
           concentration: false,
           solsniffer: false,
+          // NEW: Initialize liquidity quality criteria
+          liquidityQuality: false,
+          liquidityGrowth: false,
         },
         passed: false,
         failureReasons: [],
         confidence: 0,
+        riskLevel: 'HIGH' // Default to high risk
       };
       
-      // Evaluate each criterion
+      // Evaluate traditional criteria
       this.evaluateMarketCap(evaluation);
       this.evaluateLiquidity(evaluation);
       this.evaluateHolders(evaluation);
       this.evaluateConcentration(evaluation);
       await this.evaluateSolSniffer(evaluation, token);
       
-      // Calculate overall result
-      evaluation.passed = Object.values(evaluation.criteria).every(v => v === true);
-      evaluation.confidence = this.calculateConfidence(evaluation);
+      // NEW: Evaluate liquidity quality and growth
+      await this.evaluateLiquidityQuality(evaluation);
+      await this.evaluateLiquidityGrowth(evaluation);
       
-      // Log evaluation
+      // Calculate overall result with enhanced criteria
+      evaluation.passed = Object.values(evaluation.criteria).every(v => v === true);
+      evaluation.confidence = this.calculateEnhancedConfidence(evaluation);
+      evaluation.riskLevel = this.assessRiskLevel(evaluation);
+      
+      // Enhanced position sizing
+      evaluation.recommendedPosition = this.calculatePositionSize(evaluation);
+      evaluation.positionLimitFactors = this.getPositionLimitFactors(evaluation);
+      
+      // Enhanced logging with liquidity context
       logger.info(`Buy evaluation for ${token.symbol}: ${evaluation.passed ? 'PASSED' : 'FAILED'}`, {
         criteria: evaluation.criteria,
-        score: evaluation.solsnifferScore
+        liquidityGrade: evaluation.liquidityQualityScore?.grade,
+        liquidityMomentum: evaluation.liquidityGrowthMetrics?.momentum,
+        riskLevel: evaluation.riskLevel,
+        confidence: evaluation.confidence.toFixed(2)
       });
       
       if (!evaluation.passed) {
@@ -101,7 +131,7 @@ export class BuySignalEvaluator extends EventEmitter {
       // Record evaluation
       await this.recordEvaluation(evaluation, Date.now() - startTime);
       
-      // Emit event
+      // Emit event with enhanced data
       this.emit('evaluationComplete', evaluation);
       
       return evaluation;
@@ -109,6 +139,68 @@ export class BuySignalEvaluator extends EventEmitter {
     } catch (error) {
       logger.error(`Buy evaluation failed for ${tokenAddress}:`, error);
       throw error;
+    }
+  }
+  
+  /**
+   * NEW: Evaluate liquidity quality
+   */
+  private async evaluateLiquidityQuality(evaluation: BuyEvaluation): Promise<void> {
+    try {
+      const qualityScore = await LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(evaluation.tokenAddress);
+      evaluation.liquidityQualityScore = qualityScore;
+      
+      // Pass if liquidity quality is good or excellent AND not risky
+      evaluation.criteria.liquidityQuality = 
+        qualityScore.overallScore >= 70 && 
+        ['EXCELLENT', 'GOOD', 'FAIR'].includes(qualityScore.tradingSuitability) &&
+        qualityScore.riskLevel !== 'EXTREME';
+      
+      if (!evaluation.criteria.liquidityQuality) {
+        evaluation.failureReasons.push(
+          `Liquidity quality: ${qualityScore.grade} (${qualityScore.overallScore}/100) - ${qualityScore.tradingSuitability}`
+        );
+        
+        // Add specific warnings if available
+        if (qualityScore.warnings.length > 0) {
+          evaluation.failureReasons.push(`Quality warnings: ${qualityScore.warnings.join(', ')}`);
+        }
+      } else {
+        logger.info(`[BUY_SIGNAL] Liquidity quality PASSED: ${qualityScore.grade} (${qualityScore.overallScore}/100)`);
+      }
+      
+    } catch (error) {
+      logger.error('Error evaluating liquidity quality:', error);
+      evaluation.criteria.liquidityQuality = false;
+      evaluation.failureReasons.push('Liquidity quality evaluation failed');
+    }
+  }
+  
+  /**
+   * NEW: Evaluate liquidity growth patterns
+   */
+  private async evaluateLiquidityGrowth(evaluation: BuyEvaluation): Promise<void> {
+    try {
+      const growthMetrics = await LIQUIDITY_GROWTH_TRACKER.getGrowthMetrics(evaluation.tokenAddress);
+      evaluation.liquidityGrowthMetrics = growthMetrics;
+      
+      // Pass if growth is healthy (positive or stable momentum, not declining)
+      evaluation.criteria.liquidityGrowth = 
+        ['HIGH', 'MEDIUM', 'LOW'].includes(growthMetrics.momentum) && // Not declining
+        growthMetrics.growthRate1h >= -2; // Not rapidly losing liquidity
+      
+      if (!evaluation.criteria.liquidityGrowth) {
+        evaluation.failureReasons.push(
+          `Liquidity growth: ${growthMetrics.momentum} momentum (${growthMetrics.growthRate1h.toFixed(2)} SOL/hour)`
+        );
+      } else {
+        logger.info(`[BUY_SIGNAL] Liquidity growth PASSED: ${growthMetrics.momentum} momentum`);
+      }
+      
+    } catch (error) {
+      logger.error('Error evaluating liquidity growth:', error);
+      evaluation.criteria.liquidityGrowth = false;
+      evaluation.failureReasons.push('Liquidity growth evaluation failed');
     }
   }
   
@@ -270,43 +362,183 @@ export class BuySignalEvaluator extends EventEmitter {
   }
   
   /**
-   * Calculate confidence score
+   * ENHANCED: Calculate confidence score with liquidity factors
    */
-  private calculateConfidence(evaluation: BuyEvaluation): number {
+  private calculateEnhancedConfidence(evaluation: BuyEvaluation): number {
     if (!evaluation.passed) return 0;
     
-    let confidence = 0.5; // Base confidence
+    let confidence = 0.3; // Lower base confidence - more stringent
     
-    // Market cap in sweet spot
+    // Traditional factors (reduced weight)
     if (evaluation.marketCap >= 35000 && evaluation.marketCap <= 70000) {
       confidence += 0.1;
     }
     
-    // Strong liquidity
     if (evaluation.liquidity > 15000) {
       confidence += 0.1;
     }
     
-    // Good holder count
     if (evaluation.holders > 150) {
-      confidence += 0.1;
+      confidence += 0.05;
     }
     
-    // Low concentration
     if (evaluation.top10Percent < 15) {
-      confidence += 0.1;
+      confidence += 0.05;
     }
     
-    // High SolSniffer score (but not 90)
     if (evaluation.solsnifferScore > 80 && evaluation.solsnifferScore !== 90) {
       confidence += 0.1;
+    }
+    
+    // NEW: Liquidity quality factors (higher weight)
+    if (evaluation.liquidityQualityScore) {
+      const qualityScore = evaluation.liquidityQualityScore;
+      
+      // Excellent liquidity quality gives major boost
+      if (qualityScore.tradingSuitability === 'EXCELLENT') {
+        confidence += 0.15;
+      } else if (qualityScore.tradingSuitability === 'GOOD') {
+        confidence += 0.1;
+      } else if (qualityScore.tradingSuitability === 'FAIR') {
+        confidence += 0.05;
+      }
+      
+      // Stable price is important
+      if (qualityScore.indicators.stablePrice) {
+        confidence += 0.05;
+      }
+      
+      // Near graduation is valuable
+      if (qualityScore.indicators.nearGraduation) {
+        confidence += 0.1;
+      }
+    }
+    
+    // NEW: Liquidity growth factors
+    if (evaluation.liquidityGrowthMetrics) {
+      const growth = evaluation.liquidityGrowthMetrics;
+      
+      if (growth.momentum === 'HIGH' && growth.accelerating) {
+        confidence += 0.15; // High momentum + acceleration
+      } else if (growth.momentum === 'HIGH') {
+        confidence += 0.1;
+      } else if (growth.momentum === 'MEDIUM') {
+        confidence += 0.05;
+      }
+      
+      // Positive recent growth
+      if (growth.growthRate1h > 1) {
+        confidence += 0.05;
+      }
     }
     
     return Math.min(1, confidence);
   }
   
   /**
-   * Record evaluation in database
+   * NEW: Assess overall risk level
+   */
+  private assessRiskLevel(evaluation: BuyEvaluation): 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME' {
+    const riskFactors = [
+      !evaluation.criteria.marketCap,
+      !evaluation.criteria.liquidity,
+      !evaluation.criteria.holders,
+      !evaluation.criteria.concentration,
+      !evaluation.criteria.solsniffer,
+      !evaluation.criteria.liquidityQuality,
+      !evaluation.criteria.liquidityGrowth,
+      evaluation.liquidityQualityScore?.riskLevel === 'EXTREME',
+      evaluation.liquidityGrowthMetrics?.momentum === 'DECLINING'
+    ];
+    
+    const riskCount = riskFactors.filter(Boolean).length;
+    
+    if (riskCount === 0 && evaluation.confidence > 0.8) return 'LOW';
+    if (riskCount <= 1 && evaluation.confidence > 0.6) return 'MEDIUM';
+    if (riskCount <= 3) return 'HIGH';
+    return 'EXTREME';
+  }
+  
+  /**
+   * NEW: Calculate position size based on liquidity quality
+   */
+  private calculatePositionSize(evaluation: BuyEvaluation): number {
+    if (!evaluation.passed) return 0;
+    
+    let baseSize = 1.0; // Base position size (could be SOL amount or percentage)
+    
+    // Adjust based on liquidity quality
+    if (evaluation.liquidityQualityScore) {
+      const quality = evaluation.liquidityQualityScore;
+      
+      switch (quality.tradingSuitability) {
+        case 'EXCELLENT':
+          baseSize *= 1.5; // Can trade larger size
+          break;
+        case 'GOOD':
+          baseSize *= 1.2;
+          break;
+        case 'FAIR':
+          baseSize *= 1.0;
+          break;
+        case 'POOR':
+          baseSize *= 0.5;
+          break;
+        case 'RISKY':
+          baseSize *= 0.25;
+          break;
+      }
+    }
+    
+    // Adjust based on confidence
+    baseSize *= evaluation.confidence;
+    
+    // Adjust based on risk level
+    switch (evaluation.riskLevel) {
+      case 'LOW':
+        baseSize *= 1.2;
+        break;
+      case 'MEDIUM':
+        baseSize *= 1.0;
+        break;
+      case 'HIGH':
+        baseSize *= 0.6;
+        break;
+      case 'EXTREME':
+        baseSize *= 0.3;
+        break;
+    }
+    
+    return Math.max(0.1, Math.min(baseSize, 3.0)); // Between 0.1 and 3.0
+  }
+  
+  /**
+   * NEW: Get factors limiting position size
+   */
+  private getPositionLimitFactors(evaluation: BuyEvaluation): string[] {
+    const factors: string[] = [];
+    
+    if (evaluation.liquidityQualityScore?.tradingSuitability === 'POOR') {
+      factors.push('Poor liquidity quality limits position size');
+    }
+    
+    if (evaluation.liquidityGrowthMetrics?.momentum === 'DECLINING') {
+      factors.push('Declining liquidity momentum limits position size');
+    }
+    
+    if (evaluation.riskLevel === 'HIGH' || evaluation.riskLevel === 'EXTREME') {
+      factors.push(`${evaluation.riskLevel} risk level limits position size`);
+    }
+    
+    if (evaluation.confidence < 0.6) {
+      factors.push('Low confidence limits position size');
+    }
+    
+    return factors;
+  }
+  
+  /**
+   * ENHANCED: Record evaluation in database with liquidity data
    */
   private async recordEvaluation(evaluation: BuyEvaluation, duration: number): Promise<void> {
     await db('buy_evaluations').insert({
@@ -323,9 +555,19 @@ export class BuySignalEvaluator extends EventEmitter {
       concentration_pass: evaluation.criteria.concentration,
       solsniffer_pass: evaluation.criteria.solsniffer,
       
+      // NEW: Liquidity quality fields
+      liquidity_quality_pass: evaluation.criteria.liquidityQuality,
+      liquidity_growth_pass: evaluation.criteria.liquidityGrowth,
+      liquidity_quality_score: evaluation.liquidityQualityScore?.overallScore,
+      liquidity_quality_grade: evaluation.liquidityQualityScore?.grade,
+      liquidity_momentum: evaluation.liquidityGrowthMetrics?.momentum,
+      
       passed: evaluation.passed,
       failure_reasons: JSON.stringify(evaluation.failureReasons),
+      confidence: evaluation.confidence,
+      risk_level: evaluation.riskLevel,
       position_size: evaluation.recommendedPosition,
+      position_limit_factors: JSON.stringify(evaluation.positionLimitFactors),
       
       evaluation_duration_ms: duration,
       created_at: new Date(),
@@ -397,29 +639,39 @@ export class BuySignalEvaluator extends EventEmitter {
   }
   
   /**
-   * Get statistics
+   * ENHANCED: Get statistics with liquidity metrics
    */
   async getStats(): Promise<any> {
     const [
       totalEvaluations,
       passedEvaluations,
-      recentEvaluations
+      recentEvaluations,
+      liquidityQualityPassed,
+      highConfidenceEvaluations
     ] = await Promise.all([
       db('buy_evaluations').count('* as count').first(),
       db('buy_evaluations').where('passed', true).count('* as count').first(),
       db('buy_evaluations')
         .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-        .count('* as count').first()
+        .count('* as count').first(),
+      db('buy_evaluations').where('liquidity_quality_pass', true).count('* as count').first(),
+      db('buy_evaluations').where('confidence', '>', 0.8).count('* as count').first()
     ]);
     
     const passRate = Number(totalEvaluations?.count) > 0
       ? (Number(passedEvaluations?.count) / Number(totalEvaluations?.count)) * 100
       : 0;
     
+    const liquidityQualityRate = Number(totalEvaluations?.count) > 0
+      ? (Number(liquidityQualityPassed?.count) / Number(totalEvaluations?.count)) * 100
+      : 0;
+    
     return {
       totalEvaluations: Number(totalEvaluations?.count) || 0,
       passedEvaluations: Number(passedEvaluations?.count) || 0,
       passRate: passRate.toFixed(2) + '%',
+      liquidityQualityRate: liquidityQualityRate.toFixed(2) + '%',
+      highConfidenceEvaluations: Number(highConfidenceEvaluations?.count) || 0,
       last24Hours: Number(recentEvaluations?.count) || 0,
     };
   }

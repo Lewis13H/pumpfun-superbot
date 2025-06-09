@@ -1,4 +1,4 @@
-// src/grpc/grpc-stream-manager.ts - FINAL VERSION WITH DETAILED ERROR LOGGING
+// src/grpc/grpc-stream-manager.ts - ENHANCED WITH LIQUIDITY ANALYTICS v4.26
 
 import { YellowstoneGrpcClient, TokenPrice, TokenTransaction } from './yellowstone-grpc-client';
 import { Knex } from 'knex';
@@ -8,6 +8,11 @@ import { CategoryManager } from '../category/category-manager';
 import { BuySignalEvaluator } from '../trading/buy-signal-evaluator';
 const { HELIUS_METADATA_SERVICE } = require('../services/multi-source-metadata-service');
 import { EventEmitter } from 'events';
+
+// NEW: Import enhanced liquidity services
+import { LIQUIDITY_GROWTH_TRACKER } from '../services/liquidity-growth-tracker';
+import { LIQUIDITY_QUALITY_SCORER } from '../services/liquidity-quality-scorer';
+import { LIQUIDITY_MILESTONE_ALERTS } from '../services/liquidity-milestone-alerts';
 
 export interface StreamManagerConfig {
   grpcEndpoint: string;
@@ -54,13 +59,21 @@ export class GrpcStreamManager extends EventEmitter {
     buysDetected: 0,
     sellsDetected: 0,
     errors: 0,
-    lastFlush: new Date()
+    lastFlush: new Date(),
+    // NEW: Liquidity analytics stats
+    liquidityMilestonesTriggered: 0,
+    highQualityLiquidityDetected: 0,
+    liquidityMomentumEvents: 0
   };
   
   private flushTimer?: NodeJS.Timeout;
   private priceChangeTimer?: NodeJS.Timeout;
   private statsTimer?: NodeJS.Timeout;
   private isRunning = false;
+  
+  // NEW: Liquidity tracking state
+  private lastLiquidityValues = new Map<string, number>(); // token -> last known liquidity USD
+  private liquidityCheckThrottles = new Map<string, number>(); // token -> last check timestamp
   
   private readonly config: Required<StreamManagerConfig>;
   
@@ -89,6 +102,7 @@ export class GrpcStreamManager extends EventEmitter {
     });
     
     this.setupEventHandlers();
+    this.setupLiquidityEventHandlers(); // NEW
   }
   
   private setupEventHandlers(): void {
@@ -129,6 +143,27 @@ export class GrpcStreamManager extends EventEmitter {
       this.emit('disconnected');
     });
   }
+
+  /**
+   * NEW: Setup liquidity event handlers
+   */
+  private setupLiquidityEventHandlers(): void {
+    // Handle milestone alerts
+    LIQUIDITY_MILESTONE_ALERTS.on('milestoneAlert', (alert: any) => {
+      this.stats.liquidityMilestonesTriggered++;
+      this.emit('liquidityMilestone', alert);
+    });
+
+    LIQUIDITY_MILESTONE_ALERTS.on('criticalMilestone', (alert: any) => {
+      this.stats.liquidityMilestonesTriggered++;
+      this.emit('criticalLiquidityMilestone', alert);
+    });
+
+    LIQUIDITY_MILESTONE_ALERTS.on('highMilestone', (alert: any) => {
+      this.stats.liquidityMilestonesTriggered++;
+      this.emit('highLiquidityMilestone', alert);
+    });
+  }
   
   async start(): Promise<void> {
     if (this.isRunning) {
@@ -136,7 +171,7 @@ export class GrpcStreamManager extends EventEmitter {
       return;
     }
     
-    logger.info('🚀 Starting gRPC stream manager...');
+    logger.info('🚀 Starting enhanced gRPC stream manager with liquidity analytics...');
     
     try {
       // Test database connection
@@ -176,7 +211,7 @@ export class GrpcStreamManager extends EventEmitter {
       
       this.isRunning = true;
       
-      logger.info('✅ Stream manager started successfully');
+      logger.info('✅ Enhanced stream manager started successfully');
       this.emit('started');
       
     } catch (error) {
@@ -218,6 +253,9 @@ export class GrpcStreamManager extends EventEmitter {
     this.emit('stopped');
   }
   
+  /**
+   * ENHANCED: Handle price updates with liquidity analytics
+   */
   private async handlePriceUpdate(price: TokenPrice): Promise<void> {
     try {
       if (!price.tokenAddress) {
@@ -276,6 +314,9 @@ export class GrpcStreamManager extends EventEmitter {
       
       this.stats.pricesProcessed++;
       
+      // NEW: Enhanced liquidity tracking and analytics
+      await this.handleLiquidityAnalytics(price, tokenExists);
+      
       // Check category transitions
       if (tokenExists) {
         const previousCategory = tokenExists.category;
@@ -293,6 +334,14 @@ export class GrpcStreamManager extends EventEmitter {
             market_cap_at_transition: price.marketCap,
             reason: 'market_cap_threshold',
             created_at: new Date()
+          });
+
+          // NEW: Emit category change event for liquidity analysis
+          this.emit('categoryChanged', {
+            tokenAddress: price.tokenAddress,
+            fromCategory: previousCategory,
+            toCategory: newCategory,
+            marketCap: price.marketCap
           });
         }
       }
@@ -312,6 +361,123 @@ export class GrpcStreamManager extends EventEmitter {
       this.stats.errors++;
     }
   }
+
+  /**
+   * NEW: Handle liquidity analytics for price updates
+   */
+  private async handleLiquidityAnalytics(price: TokenPrice, tokenData: any): Promise<void> {
+    try {
+      // Only process tokens with meaningful liquidity to avoid noise
+      if (price.liquidityUsd < 1000) {
+        return;
+      }
+
+      // Throttle liquidity checks to avoid overwhelming the system (max once per minute per token)
+      const lastCheck = this.liquidityCheckThrottles.get(price.tokenAddress) || 0;
+      const now = Date.now();
+      if (now - lastCheck < 60000) { // 1 minute throttle
+        return;
+      }
+      this.liquidityCheckThrottles.set(price.tokenAddress, now);
+
+      // Get previous liquidity value for milestone detection
+      const previousLiquidity = this.lastLiquidityValues.get(price.tokenAddress) || 0;
+      this.lastLiquidityValues.set(price.tokenAddress, price.liquidityUsd);
+
+      // 1. Check for liquidity milestones
+      if (previousLiquidity > 0 && Math.abs(price.liquidityUsd - previousLiquidity) > 500) {
+        try {
+          const milestones = await LIQUIDITY_MILESTONE_ALERTS.checkMilestones(price.tokenAddress, {
+            liquidity_usd: price.liquidityUsd,
+            real_sol_reserves: price.realSolReserves || 0,
+            timestamp: price.timestamp
+          });
+
+          // Emit milestone events
+          for (const milestone of milestones) {
+            if (milestone.actionable) {
+              this.emit('actionableMilestone', milestone);
+            }
+          }
+        } catch (error) {
+          logger.debug(`Error checking liquidity milestones for ${price.tokenAddress}:`, error);
+        }
+      }
+
+      // 2. Calculate liquidity quality for AIM tokens
+      if (price.marketCap >= 35000 && price.marketCap <= 105000) {
+        try {
+          const qualityScore = await LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(price.tokenAddress);
+          
+          if (qualityScore.tradingSuitability === 'EXCELLENT' || qualityScore.tradingSuitability === 'GOOD') {
+            this.stats.highQualityLiquidityDetected++;
+            this.emit('highQualityLiquidity', {
+              tokenAddress: price.tokenAddress,
+              score: qualityScore.overallScore,
+              grade: qualityScore.grade,
+              suitability: qualityScore.tradingSuitability,
+              liquidityUsd: price.liquidityUsd,
+              marketCap: price.marketCap
+            });
+          }
+        } catch (error) {
+          logger.debug(`Error calculating liquidity quality for ${price.tokenAddress}:`, error);
+        }
+      }
+
+      // 3. Track liquidity growth for high-activity tokens
+      if (price.liquidityUsd > 5000) {
+        try {
+          const growthMetrics = await LIQUIDITY_GROWTH_TRACKER.getGrowthMetrics(
+            price.tokenAddress,
+            300000 // 5 minute cache
+          );
+          
+          if (growthMetrics.momentum === 'HIGH' && growthMetrics.accelerating) {
+            this.stats.liquidityMomentumEvents++;
+            this.emit('liquidityMomentum', {
+              tokenAddress: price.tokenAddress,
+              growthRate1h: growthMetrics.growthRate1h,
+              momentum: growthMetrics.momentum,
+              accelerating: growthMetrics.accelerating,
+              currentLiquidity: growthMetrics.currentLiquiditySol,
+              message: `🚀 HIGH MOMENTUM: +${growthMetrics.growthRate1h.toFixed(1)} SOL/hour`
+            });
+          }
+        } catch (error) {
+          logger.debug(`Error calculating liquidity growth for ${price.tokenAddress}:`, error);
+        }
+      }
+
+      // 4. Detect significant liquidity changes (pumps/dumps)
+      if (previousLiquidity > 0) {
+        const liquidityChange = ((price.liquidityUsd - previousLiquidity) / previousLiquidity) * 100;
+        
+        if (liquidityChange > 50 && price.liquidityUsd > 10000) {
+          logger.info(`💰 LIQUIDITY PUMP: ${price.tokenAddress.substring(0,8)}... +${liquidityChange.toFixed(1)}% liquidity`);
+          
+          this.emit('liquidityPump', {
+            tokenAddress: price.tokenAddress,
+            liquidityChange,
+            currentLiquidity: price.liquidityUsd,
+            previousLiquidity
+          });
+        } else if (liquidityChange < -30 && previousLiquidity > 5000) {
+          logger.warn(`📉 LIQUIDITY DUMP: ${price.tokenAddress.substring(0,8)}... ${liquidityChange.toFixed(1)}% liquidity`);
+          
+          this.emit('liquidityDump', {
+            tokenAddress: price.tokenAddress,
+            liquidityChange,
+            currentLiquidity: price.liquidityUsd,
+            previousLiquidity
+          });
+        }
+      }
+
+    } catch (error) {
+      logger.debug(`Error in liquidity analytics for ${price.tokenAddress}:`, error);
+    }
+  }
   
   private determineCategory(marketCap: number): string {
     if (marketCap < 5000) return 'NEW';
@@ -324,10 +490,6 @@ export class GrpcStreamManager extends EventEmitter {
   
   private async handleTransaction(tx: TokenTransaction): Promise<void> {
     try {
-      //if (tx.type === 'create') {
-        //return; // Handled by handleNewToken
-      //}
-      
       if (tx.tokenAddress === 'unknown') {
         return;
       }
@@ -401,6 +563,9 @@ export class GrpcStreamManager extends EventEmitter {
         logger.info(`🆕 NEW TOKEN: ${tx.tokenAddress.substring(0, 8)}... | Metadata loading...`);
         this.stats.newTokensDiscovered++;
         
+        // NEW: Initialize liquidity tracking for new token
+        this.lastLiquidityValues.set(tx.tokenAddress, 0);
+        
         this.emit('newToken', newToken);
         
       } catch (error: any) {
@@ -414,6 +579,9 @@ export class GrpcStreamManager extends EventEmitter {
     }
   }
   
+  /**
+   * ENHANCED: Buy signal evaluation with liquidity context
+   */
   private async evaluateBuySignal(tokenAddress: string, price: TokenPrice): Promise<void> {
     try {
       const token = await this.db('tokens')
@@ -435,12 +603,27 @@ export class GrpcStreamManager extends EventEmitter {
       const evaluation = await this.buySignalEvaluator.evaluateToken(token.address);
       
       if (evaluation && evaluation.passed) {
-        logger.info(`🚨 BUY SIGNAL: ${tokenAddress.substring(0, 8)}... | Signal detected`);
-        this.emit('buySignal', { token, evaluation });
+        logger.info(`🚨 BUY SIGNAL: ${tokenAddress.substring(0, 8)}... | Enhanced evaluation passed`, {
+          confidence: evaluation.confidence?.toFixed(2),
+          liquidityGrade: evaluation.liquidityQualityScore?.grade,
+          riskLevel: evaluation.riskLevel
+        });
+        
+        this.emit('buySignal', { 
+          token, 
+          evaluation,
+          // NEW: Add enhanced context
+          enhancedContext: {
+            liquidityQuality: evaluation.liquidityQualityScore?.tradingSuitability,
+            liquidityMomentum: evaluation.liquidityGrowthMetrics?.momentum,
+            positionSizeRecommendation: evaluation.recommendedPosition
+          }
+        });
       }
       
     } catch (error: any) {
       // Silent fail for buy signal evaluation
+      logger.debug(`Buy signal evaluation failed for ${tokenAddress}:`, error?.message);
     }
   }
   
@@ -808,21 +991,36 @@ export class GrpcStreamManager extends EventEmitter {
     }
   }
   
-  // Clean stats display
+  // ENHANCED: Clean stats display with liquidity analytics
   private displayCleanStats(): void {
     const heliusStats = HELIUS_METADATA_SERVICE.getStats();
+    const liquidityGrowthStats = LIQUIDITY_GROWTH_TRACKER.getSummaryStats();
+    const liquidityAlertsStats = LIQUIDITY_MILESTONE_ALERTS.getAlertStats();
     
-    console.log('\n' + '='.repeat(60));
-    console.log('🚀 PUMP.FUN BOT STATUS (HELIUS INTEGRATED)');
-    console.log('='.repeat(60));
+    console.log('\n' + '='.repeat(80));
+    console.log('🚀 ENHANCED PUMP.FUN BOT STATUS v4.26');
+    console.log('='.repeat(80));
     console.log(`📊 Processed: ${this.stats.pricesProcessed} prices | ${this.stats.newTokensDiscovered} new tokens`);
     console.log(`💰 Activity: ${this.stats.buysDetected} buys | ${this.stats.sellsDetected} sells`);
     console.log(`📝 Metadata Queue: ${heliusStats.processingQueue} processing | ${heliusStats.retryQueue} retrying`);
+    console.log(`💎 Liquidity: ${this.stats.liquidityMilestonesTriggered} milestones | ${this.stats.highQualityLiquidityDetected} high-quality | ${this.stats.liquidityMomentumEvents} momentum`);
+    console.log(`🎯 Analytics: ${liquidityGrowthStats.totalTokens} tracked | ${liquidityGrowthStats.highMomentum} high momentum | ${liquidityGrowthStats.accelerating} accelerating`);
+    console.log(`🚨 Alerts: ${liquidityAlertsStats.trackedTokens} tracked tokens | ${liquidityAlertsStats.totalMilestones} total milestones`);
     console.log(`❌ Errors: ${this.stats.errors}`);
     console.log(`🕐 Last Flush: ${this.stats.lastFlush.toLocaleTimeString()}`);
-    console.log('='.repeat(60) + '\n');
+    console.log('='.repeat(80) + '\n');
+
+    // Display top liquidity performers if available
+    if (liquidityGrowthStats.topGrowers.length > 0) {
+      console.log('🏆 TOP LIQUIDITY PERFORMERS:');
+      liquidityGrowthStats.topGrowers.forEach((grower, index) => {
+        console.log(`   ${index + 1}. ${grower.token} | +${grower.growthRate.toFixed(2)} SOL/h | ${grower.momentum}`);
+      });
+      console.log('');
+    }
   }
   
+  // ENHANCED: Get stats with liquidity analytics
   getStats() {
     return {
       ...this.stats,
@@ -833,7 +1031,64 @@ export class GrpcStreamManager extends EventEmitter {
       },
       isRunning: this.isRunning,
       grpcConnected: this.grpcClient.isActive(),
-      metadata: HELIUS_METADATA_SERVICE.getStats()
+      metadata: HELIUS_METADATA_SERVICE.getStats(),
+      // NEW: Include liquidity analytics stats
+      liquidityAnalytics: {
+        growth: LIQUIDITY_GROWTH_TRACKER.getSummaryStats(),
+        alerts: LIQUIDITY_MILESTONE_ALERTS.getAlertStats(),
+        trackedTokensCount: this.lastLiquidityValues.size,
+        throttledTokensCount: this.liquidityCheckThrottles.size
+      }
     };
+  }
+
+  /**
+   * NEW: Get liquidity analytics summary
+   */
+  getLiquidityAnalyticsSummary() {
+    return {
+      trackedTokens: this.lastLiquidityValues.size,
+      milestonesTriggered: this.stats.liquidityMilestonesTriggered,
+      highQualityDetected: this.stats.highQualityLiquidityDetected,
+      momentumEvents: this.stats.liquidityMomentumEvents,
+      growthTracker: LIQUIDITY_GROWTH_TRACKER.getSummaryStats(),
+      milestoneAlerts: LIQUIDITY_MILESTONE_ALERTS.getAlertStats()
+    };
+  }
+
+  /**
+   * NEW: Force liquidity analysis for a specific token
+   */
+  async forceLiquidityAnalysis(tokenAddress: string): Promise<any> {
+    try {
+      const tokenData = await this.db('tokens').where('address', tokenAddress).first();
+      if (!tokenData) {
+        throw new Error('Token not found');
+      }
+
+      // Force all liquidity analytics
+      const [growthMetrics, qualityScore] = await Promise.all([
+        LIQUIDITY_GROWTH_TRACKER.calculateGrowthRate(tokenAddress),
+        LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(tokenAddress)
+      ]);
+
+      // Check milestones with current data
+      const milestones = await LIQUIDITY_MILESTONE_ALERTS.checkMilestones(tokenAddress, {
+        liquidity_usd: tokenData.liquidity * this.solPriceUsd,
+        real_sol_reserves: tokenData.liquidity * 1e9,
+        timestamp: new Date()
+      });
+
+      return {
+        tokenAddress,
+        growthMetrics,
+        qualityScore,
+        milestones,
+        timestamp: new Date()
+      };
+    } catch (error) {
+      logger.error(`Error in force liquidity analysis for ${tokenAddress}:`, error);
+      return null;
+    }
   }
 }

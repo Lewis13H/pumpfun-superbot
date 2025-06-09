@@ -1,5 +1,4 @@
-// src/grpc/grpc-stream-app.ts - MODIFIED FOR V4.23 WITH HOLDER ANALYTICS
-// This shows the exact changes needed to your existing file
+// src/grpc/grpc-stream-app.ts - ENHANCED WITH LIQUIDITY ANALYTICS v4.26
 
 import { GrpcStreamManager } from './grpc-stream-manager';
 import { db } from '../database/postgres';
@@ -14,6 +13,10 @@ import { HOLDER_ANALYTICS_SERVICE } from '../services/token-holder-analytics-ser
 // Import Helius metadata service
 const { HELIUS_METADATA_SERVICE } = require('../services/multi-source-metadata-service');
 
+// NEW: Import enhanced liquidity services
+import { LIQUIDITY_GROWTH_TRACKER } from '../services/liquidity-growth-tracker';
+import { LIQUIDITY_QUALITY_SCORER } from '../services/liquidity-quality-scorer';
+import { LIQUIDITY_MILESTONE_ALERTS } from '../services/liquidity-milestone-alerts';
 
 export class GrpcStreamApplication {
   private streamManager: GrpcStreamManager;
@@ -23,7 +26,10 @@ export class GrpcStreamApplication {
   private statsInterval?: NodeJS.Timeout;
   private healthCheckInterval?: NodeJS.Timeout;
   private metadataFixInterval?: NodeJS.Timeout;
-  private holderAnalyticsInterval?: NodeJS.Timeout; // ADD THIS LINE
+  private holderAnalyticsInterval?: NodeJS.Timeout;
+  // NEW: Liquidity analytics intervals
+  private liquidityGrowthInterval?: NodeJS.Timeout;
+  private liquidityQualityInterval?: NodeJS.Timeout;
   
   constructor() {
     // Initialize without passing db - they'll use their own instances
@@ -47,12 +53,19 @@ export class GrpcStreamApplication {
   }
   
   private setupEventHandlers(): void {
-    // Handle new tokens - MODIFIED TO ADD HOLDER ANALYTICS
+    // Handle new tokens - ENHANCED WITH LIQUIDITY TRACKING
     this.streamManager.on('newToken', async (token: any) => {
-      logger.info(`🎉 New token discovered: ${token.address.substring(0, 8)}... | Metadata & holder analysis queuing...`);
+      logger.info(`🎉 New token discovered: ${token.address.substring(0, 8)}... | Metadata & analytics queuing...`);
       
-      // NEW: Queue for holder analysis  
+      // Queue for holder analysis  
       HOLDER_ANALYTICS_SERVICE.queueTokenForHolderAnalysis(token.address, 'HIGH');
+      
+      // NEW: Initialize liquidity tracking for new tokens
+      LIQUIDITY_MILESTONE_ALERTS.emit('newTokenDetected', {
+        tokenAddress: token.address,
+        initialLiquidity: 0,
+        timestamp: new Date()
+      });
       
       // Broadcast to WebSocket clients
       if (this.wsService) {
@@ -70,7 +83,7 @@ export class GrpcStreamApplication {
       }
     });
 
-    // NEW: Handle holder analytics updates
+    // Handle holder analytics updates
     HOLDER_ANALYTICS_SERVICE.on('holdersUpdated', async (holderMetrics: any) => {
       const tokenData = await db('tokens').where('address', holderMetrics.tokenAddress).first();
       const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
@@ -117,8 +130,125 @@ export class GrpcStreamApplication {
         }, 5000); // Wait 5 seconds for data to propagate
       }
     });
+
+    // NEW: Handle liquidity milestone alerts
+    LIQUIDITY_MILESTONE_ALERTS.on('milestoneAlert', async (alert: any) => {
+      const tokenData = await db('tokens').where('address', alert.tokenAddress).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
+        ? tokenData.symbol
+        : alert.tokenAddress.substring(0, 8) + '...';
+
+      logger.info(`🎯 LIQUIDITY MILESTONE: ${displaySymbol} - ${alert.message}`);
+
+      // Broadcast to WebSocket clients
+      if (this.wsService) {
+        this.wsService.broadcast('liquidityMilestone', {
+          ...alert,
+          symbol: displaySymbol
+        });
+      }
+    });
+
+    // NEW: Handle critical liquidity milestones
+    LIQUIDITY_MILESTONE_ALERTS.on('criticalMilestone', async (alert: any) => {
+      const tokenData = await db('tokens').where('address', alert.tokenAddress).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
+        ? tokenData.symbol
+        : alert.tokenAddress.substring(0, 8) + '...';
+
+      logger.info(`🚨 CRITICAL LIQUIDITY: ${displaySymbol} - ${alert.message}`);
+
+      // Broadcast to WebSocket clients with priority
+      if (this.wsService) {
+        this.wsService.broadcast('criticalLiquidityMilestone', {
+          ...alert,
+          symbol: displaySymbol,
+          priority: 'CRITICAL'
+        });
+      }
+
+      // If this is an AIM token with critical milestone, re-evaluate immediately
+      if (tokenData?.category === 'AIM' && alert.actionable) {
+        setTimeout(async () => {
+          try {
+            const evaluation = await this.buySignalEvaluator.evaluateToken(alert.tokenAddress);
+            if (evaluation.passed) {
+              logger.info(`🚨 CRITICAL MILESTONE BUY SIGNAL: ${displaySymbol}`);
+              
+              if (this.wsService) {
+                this.wsService.broadcast('urgentBuySignal', {
+                  token: tokenData,
+                  signal: evaluation,
+                  trigger: 'CRITICAL_LIQUIDITY_MILESTONE',
+                  milestone: alert
+                });
+              }
+            }
+          } catch (error) {
+            logger.error(`Error re-evaluating token after critical milestone:`, error);
+          }
+        }, 2000); // Faster response for critical events
+      }
+    });
+
+    // NEW: Handle high quality liquidity events
+    this.streamManager.on('highQualityLiquidity', async (data: any) => {
+      const tokenData = await db('tokens').where('address', data.tokenAddress).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
+        ? tokenData.symbol
+        : data.tokenAddress.substring(0, 8) + '...';
+
+      logger.info(`💎 HIGH QUALITY LIQUIDITY: ${displaySymbol} - Grade: ${data.grade} (${data.score}/100)`);
+
+      if (this.wsService) {
+        this.wsService.broadcast('highQualityLiquidity', {
+          ...data,
+          symbol: displaySymbol
+        });
+      }
+    });
+
+    // NEW: Handle liquidity momentum events
+    this.streamManager.on('liquidityMomentum', async (data: any) => {
+      const tokenData = await db('tokens').where('address', data.tokenAddress).first();
+      const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
+        ? tokenData.symbol
+        : data.tokenAddress.substring(0, 8) + '...';
+
+      logger.info(`🚀 LIQUIDITY MOMENTUM: ${displaySymbol} - ${data.message}`);
+
+      if (this.wsService) {
+        this.wsService.broadcast('liquidityMomentum', {
+          ...data,
+          symbol: displaySymbol
+        });
+      }
+
+      // If this is an AIM token with high momentum, evaluate for trading
+      if (tokenData?.category === 'AIM' && data.momentum === 'HIGH') {
+        setTimeout(async () => {
+          try {
+            const evaluation = await this.buySignalEvaluator.evaluateToken(data.tokenAddress);
+            if (evaluation.passed) {
+              logger.info(`🚀 MOMENTUM BUY SIGNAL: ${displaySymbol}`);
+              
+              if (this.wsService) {
+                this.wsService.broadcast('momentumBuySignal', {
+                  token: tokenData,
+                  signal: evaluation,
+                  trigger: 'HIGH_LIQUIDITY_MOMENTUM',
+                  momentum: data
+                });
+              }
+            }
+          } catch (error) {
+            logger.error(`Error evaluating token for momentum signal:`, error);
+          }
+        }, 3000);
+      }
+    });
     
-    // Handle buy signals - ENHANCED WITH HOLDER DATA CONTEXT
+    // Handle buy signals - ENHANCED WITH LIQUIDITY DATA CONTEXT
     this.streamManager.on('buySignal', async ({ token, signal }: { token: any; signal: any }) => {
       // Get updated token symbol for display
       const tokenData = await db('tokens').where('address', token.address).first();
@@ -126,16 +256,21 @@ export class GrpcStreamApplication {
         ? tokenData.symbol
         : token.address.substring(0, 8) + '...';
       
-      // Enhanced logging with holder data
+      // Enhanced logging with liquidity context
       logger.info(`💰 Buy signal for ${displaySymbol}: ${signal.reason}`, {
         marketCap: signal.marketCap,
         liquidity: signal.liquidity,
         holders: signal.holders,
         concentration: signal.top10Percent + '%',
-        solsniffer: signal.solsnifferScore
+        solsniffer: signal.solsnifferScore,
+        // NEW: Liquidity quality context
+        liquidityGrade: signal.liquidityQualityScore?.grade,
+        liquidityMomentum: signal.liquidityGrowthMetrics?.momentum,
+        riskLevel: signal.riskLevel,
+        confidence: signal.confidence?.toFixed(2)
       });
       
-      // Broadcast to WebSocket clients with holder context
+      // Broadcast to WebSocket clients with enhanced context
       if (this.wsService) {
         this.wsService.broadcast('buySignal', { 
           token: tokenData || token, 
@@ -146,6 +281,15 @@ export class GrpcStreamApplication {
               top10Concentration: tokenData?.top_10_percent,
               top25Concentration: tokenData?.top_25_percent,
               lastUpdated: tokenData?.holder_last_updated
+            },
+            // NEW: Enhanced liquidity context
+            liquidityContext: {
+              qualityGrade: signal.liquidityQualityScore?.grade,
+              qualityScore: signal.liquidityQualityScore?.overallScore,
+              tradingSuitability: signal.liquidityQualityScore?.tradingSuitability,
+              momentum: signal.liquidityGrowthMetrics?.momentum,
+              growthRate1h: signal.liquidityGrowthMetrics?.growthRate1h,
+              accelerating: signal.liquidityGrowthMetrics?.accelerating
             }
           }
         });
@@ -154,16 +298,36 @@ export class GrpcStreamApplication {
       // Could trigger automated trading here
     });
 
-    // NEW: Handle category changes - queue holder analysis for new AIM tokens
+    // Handle category changes - queue liquidity analysis for new AIM tokens
     this.streamManager.on('categoryChanged', async (data: any) => {
-      // When a token moves to AIM category, prioritize holder analysis
+      // When a token moves to AIM category, prioritize all analytics
       if (data.toCategory === 'AIM') {
-        logger.info(`🎯 Token moved to AIM: ${data.tokenAddress} - prioritizing holder analysis`);
+        logger.info(`🎯 Token moved to AIM: ${data.tokenAddress} - prioritizing all analytics`);
         HOLDER_ANALYTICS_SERVICE.queueTokenForHolderAnalysis(data.tokenAddress, 'HIGH');
+        
+        // NEW: Calculate initial liquidity quality for AIM tokens
+        setTimeout(async () => {
+          try {
+            const qualityScore = await LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(data.tokenAddress);
+            if (qualityScore.tradingSuitability === 'EXCELLENT' || qualityScore.tradingSuitability === 'GOOD') {
+              logger.info(`💎 New AIM token has ${qualityScore.tradingSuitability} liquidity quality: ${data.tokenAddress.substring(0,8)}...`);
+              
+              if (this.wsService) {
+                this.wsService.broadcast('newAimHighQuality', {
+                  tokenAddress: data.tokenAddress,
+                  qualityScore: qualityScore,
+                  category: 'AIM'
+                });
+              }
+            }
+          } catch (error) {
+            logger.error('Error calculating liquidity quality for new AIM token:', error);
+          }
+        }, 10000); // After 10 seconds to allow price data to accumulate
       }
     });
     
-    // Handle price movements - ENHANCED WITH HOLDER REFRESH LOGIC
+    // Handle price movements - ENHANCED WITH LIQUIDITY REFRESH LOGIC
     this.streamManager.on('pumpDetected', async (data: any) => {
       // Get token symbol for better logging
       const tokenData = await db('tokens').where('address', data.tokenAddress).first();
@@ -173,10 +337,26 @@ export class GrpcStreamApplication {
       
       logger.info(`🚀 PUMP: ${displaySymbol} +${data.priceChange.toFixed(1)}% | $${data.marketCap.toFixed(0)} MC`);
 
-      // NEW: For significant pumps, refresh holder data (may have new buyers)
+      // For significant pumps, refresh all analytics
       if (data.priceChange > 20 && tokenData?.category === 'AIM') {
-        logger.info(`📊 Significant pump detected - refreshing holder data for ${displaySymbol}`);
+        logger.info(`📊 Significant pump detected - refreshing all analytics for ${displaySymbol}`);
         HOLDER_ANALYTICS_SERVICE.queueTokenForHolderAnalysis(data.tokenAddress, 'HIGH');
+        
+        // NEW: Check if pump created liquidity milestones
+        setTimeout(async () => {
+          try {
+            const currentTokenData = await db('tokens').where('address', data.tokenAddress).first();
+            if (currentTokenData) {
+              await LIQUIDITY_MILESTONE_ALERTS.checkMilestones(data.tokenAddress, {
+                liquidity_usd: currentTokenData.liquidity * await this.getCurrentSolPrice(),
+                real_sol_reserves: currentTokenData.liquidity * 1e9, // Convert to lamports
+                timestamp: new Date()
+              });
+            }
+          } catch (error) {
+            logger.error('Error checking liquidity milestones after pump:', error);
+          }
+        }, 5000);
       }
       
       if (this.wsService) {
@@ -241,7 +421,7 @@ export class GrpcStreamApplication {
   }
   
   async start(): Promise<void> {
-    logger.info('🚀 Starting gRPC Stream Application v4.23 with Holder Analytics...');
+    logger.info('🚀 Starting gRPC Stream Application v4.26 with Enhanced Liquidity Analytics...');
     
     try {
       // Initialize services
@@ -256,7 +436,7 @@ export class GrpcStreamApplication {
       // Setup graceful shutdown
       this.setupGracefulShutdown();
       
-      logger.info('✅ gRPC Stream Application v4.23 started successfully');
+      logger.info('✅ gRPC Stream Application v4.26 started successfully');
       
     } catch (error) {
       logger.error('Failed to start application:', error);
@@ -277,7 +457,7 @@ export class GrpcStreamApplication {
     `);
     logger.info('✅ TimescaleDB version:', tsCheck.rows[0]?.installed_version || 'Not installed');
 
-    // NEW: Check holder analytics columns
+    // Check holder analytics columns
     const holderColumnsCheck = await db.raw(`
       SELECT column_name 
       FROM information_schema.columns 
@@ -286,6 +466,14 @@ export class GrpcStreamApplication {
     `);
     const hasHolderColumns = holderColumnsCheck.rows.length === 4;
     logger.info(`✅ Holder analytics columns: ${hasHolderColumns ? 'Present' : 'Missing - run migration'}`);
+
+    // NEW: Check liquidity analytics tables
+    const liquidityTablesCheck = await db.raw(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_name IN ('liquidity_milestone_alerts', 'liquidity_growth_snapshots', 'buy_evaluations')
+    `);
+    logger.info(`✅ Liquidity analytics tables: ${liquidityTablesCheck.rows.length}/3 present`);
     
     // Initialize SOL price service
     await SOL_PRICE_SERVICE.initialize();
@@ -294,9 +482,15 @@ export class GrpcStreamApplication {
     // Initialize Shyft metadata service
     logger.info('✅ Shyft metadata service initialized');
 
-    // NEW: Initialize holder analytics service
+    // Initialize holder analytics service
     await HOLDER_ANALYTICS_SERVICE.start();
     logger.info('✅ Holder analytics service initialized');
+
+    // NEW: Initialize enhanced liquidity services
+    // Note: These are singletons that initialize automatically
+    logger.info('✅ Liquidity growth tracker initialized');
+    logger.info('✅ Liquidity quality scorer initialized');
+    logger.info('✅ Liquidity milestone alerts initialized');
     
     // Fix missing metadata on startup (after delay)
     setTimeout(async () => {
@@ -309,7 +503,7 @@ export class GrpcStreamApplication {
       }
     }, 30000); // After 30 seconds
 
-    // NEW: Queue high-priority tokens for holder analysis
+    // Queue high-priority tokens for holder analysis
     setTimeout(async () => {
       try {
         logger.info('📊 Starting initial holder analytics...');
@@ -319,6 +513,30 @@ export class GrpcStreamApplication {
         logger.error('Error during startup holder analysis:', error);
       }
     }, 45000); // After 45 seconds
+
+    // NEW: Initialize liquidity analytics for existing AIM tokens
+    setTimeout(async () => {
+      try {
+        logger.info('💎 Starting initial liquidity analytics...');
+        const aimTokens = await db('tokens')
+          .where('category', 'AIM')
+          .where('market_cap', '>', 35000)
+          .limit(20)
+          .pluck('address');
+        
+        for (const tokenAddress of aimTokens) {
+          try {
+            await LIQUIDITY_GROWTH_TRACKER.getGrowthMetrics(tokenAddress);
+            await LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(tokenAddress);
+          } catch (error) {
+            logger.debug(`Error calculating initial liquidity metrics for ${tokenAddress}:`, error);
+          }
+        }
+        logger.info(`✅ Calculated initial liquidity metrics for ${aimTokens.length} AIM tokens`);
+      } catch (error) {
+        logger.error('Error during startup liquidity analytics:', error);
+      }
+    }, 60000); // After 60 seconds
     
     // Initialize WebSocket service if enabled
     if (config.WEBSOCKET_ENABLED) {
@@ -329,13 +547,16 @@ export class GrpcStreamApplication {
   }
   
   private startPeriodicTasks(): void {
-    // ENHANCED: Stats display with holder analytics
+    // ENHANCED: Stats display with all analytics
     this.statsInterval = setInterval(async () => {
       const stats = this.streamManager.getStats();
       const metadataStats = HELIUS_METADATA_SERVICE.getStats();
-      const holderStats = HOLDER_ANALYTICS_SERVICE.getStats(); // NEW
+      const holderStats = HOLDER_ANALYTICS_SERVICE.getStats();
+      // NEW: Get liquidity analytics stats
+      const liquidityGrowthStats = LIQUIDITY_GROWTH_TRACKER.getSummaryStats();
+      const liquidityAlertsStats = LIQUIDITY_MILESTONE_ALERTS.getAlertStats();
 
-      // NEW: Get holder analytics summary
+      // Get holder analytics summary
       const holderSummary = await db.raw('SELECT * FROM get_holder_analytics_stats()');
       
       logger.info('📊 Stream Statistics:', {
@@ -352,14 +573,29 @@ export class GrpcStreamApplication {
           retrying: metadataStats.retryQueue,
           requestDelay: metadataStats.requestDelay
         },
-        holderAnalytics: { // NEW
+        holderAnalytics: {
           processing: holderStats.processingQueue,
           retrying: holderStats.retryQueue,
           requestDelay: holderStats.requestDelay
+        },
+        // NEW: Liquidity analytics stats
+        liquidityAnalytics: {
+          growth: liquidityGrowthStats,
+          alerts: liquidityAlertsStats
         }
       });
 
-      // NEW: Log holder analytics summary
+      // Log liquidity analytics summary
+      if (liquidityGrowthStats.totalTokens > 0) {
+        logger.info('💎 Liquidity Analytics Summary:', {
+          trackedTokens: liquidityGrowthStats.totalTokens,
+          highMomentum: liquidityGrowthStats.highMomentum,
+          accelerating: liquidityGrowthStats.accelerating,
+          topGrowers: liquidityGrowthStats.topGrowers
+        });
+      }
+
+      // Log holder analytics summary
       if (holderSummary.rows.length > 0) {
         logger.info('📊 Holder Analytics Summary:', holderSummary.rows);
       }
@@ -369,8 +605,13 @@ export class GrpcStreamApplication {
         this.wsService.broadcast('stats', {
           ...stats,
           metadata: metadataStats,
-          holderAnalytics: holderStats, // NEW
-          holderSummary: holderSummary.rows // NEW
+          holderAnalytics: holderStats,
+          holderSummary: holderSummary.rows,
+          // NEW: Include liquidity analytics
+          liquidityAnalytics: {
+            growth: liquidityGrowthStats,
+            alerts: liquidityAlertsStats
+          }
         });
       }
     }, 30000); // Every 30 seconds
@@ -387,7 +628,7 @@ export class GrpcStreamApplication {
       }
     }, 15 * 60 * 1000); // Every 15 minutes
 
-    // NEW: Periodic holder analytics (every 3 minutes for AIM tokens)
+    // Periodic holder analytics (every 3 minutes for AIM tokens)
     this.holderAnalyticsInterval = setInterval(async () => {
       try {
         await HOLDER_ANALYTICS_SERVICE.queueTokensByCategory();
@@ -395,9 +636,79 @@ export class GrpcStreamApplication {
       } catch (error) {
         logger.error('Error during periodic holder analytics:', error);
       }
-    }, 3 * 60 * 1000); // Every 3 minutes (fastest update cycle)
+    }, 3 * 60 * 1000); // Every 3 minutes
+
+    // NEW: Periodic liquidity growth tracking (every 2 minutes)
+    this.liquidityGrowthInterval = setInterval(async () => {
+      try {
+        // Get high-activity AIM tokens for growth tracking
+        const activeTokens = await db('tokens')
+          .where('category', 'AIM')
+          .where('last_price_update', '>', new Date(Date.now() - 10 * 60 * 1000)) // Updated in last 10 minutes
+          .orderBy('market_cap', 'desc')
+          .limit(15)
+          .pluck('address');
+        
+        if (activeTokens.length > 0) {
+          const growthResults = await LIQUIDITY_GROWTH_TRACKER.batchCalculateGrowthRates(activeTokens);
+          const highMomentumTokens = Array.from(growthResults.values())
+            .filter(metrics => metrics.momentum === 'HIGH' && metrics.accelerating);
+          
+          if (highMomentumTokens.length > 0) {
+            logger.info(`🚀 Found ${highMomentumTokens.length} tokens with high liquidity momentum`);
+          }
+        }
+      } catch (error) {
+        logger.error('Error during periodic liquidity growth tracking:', error);
+      }
+    }, 2 * 60 * 1000); // Every 2 minutes
+
+    // NEW: Periodic liquidity quality assessment for AIM tokens (every 5 minutes)
+    this.liquidityQualityInterval = setInterval(async () => {
+      try {
+        // Get AIM tokens that haven't been quality-assessed recently
+        const tokensToAssess = await db('tokens')
+          .where('category', 'AIM')
+          .where('market_cap', '>', 35000)
+          .orderBy('market_cap', 'desc')
+          .limit(10)
+          .pluck('address');
+        
+        for (const tokenAddress of tokensToAssess) {
+          try {
+            const qualityScore = await LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(tokenAddress);
+            
+            // Log excellent quality tokens
+            if (qualityScore.tradingSuitability === 'EXCELLENT') {
+              const tokenData = await db('tokens').where('address', tokenAddress).first();
+              const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
+                ? tokenData.symbol
+                : tokenAddress.substring(0, 8) + '...';
+              
+              logger.info(`💎 EXCELLENT liquidity quality detected: ${displaySymbol} - Grade: ${qualityScore.grade}`);
+              
+              // Broadcast high-quality discovery
+              if (this.wsService) {
+                this.wsService.broadcast('excellentLiquidityDetected', {
+                  tokenAddress,
+                  symbol: displaySymbol,
+                  qualityScore
+                });
+              }
+            }
+          } catch (error) {
+            logger.debug(`Error assessing liquidity quality for ${tokenAddress}:`, error);
+          }
+          
+          // Small delay between assessments
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      } catch (error) {
+        logger.error('Error during periodic liquidity quality assessment:', error);
+      }
+    }, 5 * 60 * 1000); // Every 5 minutes
     
-    // ENHANCED: Health check with holder analytics
+    // ENHANCED: Health check with all services
     this.healthCheckInterval = setInterval(async () => {
       try {
         const health = await this.checkHealth();
@@ -410,7 +721,7 @@ export class GrpcStreamApplication {
             logger.info('Attempting to reconnect gRPC...');
           }
 
-          // NEW: Restart holder analytics if unhealthy
+          // Restart holder analytics if unhealthy
           if (!health.holderAnalyticsHealthy) {
             logger.info('Restarting holder analytics service...');
             try {
@@ -418,6 +729,16 @@ export class GrpcStreamApplication {
               await HOLDER_ANALYTICS_SERVICE.start();
             } catch (error) {
               logger.error('Failed to restart holder analytics service:', error);
+            }
+          }
+
+          // NEW: Clear old liquidity data if memory issues detected
+          if (!health.liquidityAnalyticsHealthy) {
+            logger.info('Clearing old liquidity analytics data...');
+            try {
+              LIQUIDITY_MILESTONE_ALERTS.clearOldHistory(24); // Clear data older than 24 hours
+            } catch (error) {
+              logger.error('Failed to clear old liquidity data:', error);
             }
           }
         }
@@ -430,7 +751,10 @@ export class GrpcStreamApplication {
   private async checkHealth(): Promise<any> {
     const stats = this.streamManager.getStats();
     const metadataStats = HELIUS_METADATA_SERVICE.getStats();
-    const holderStats = HOLDER_ANALYTICS_SERVICE.getStats(); // NEW
+    const holderStats = HOLDER_ANALYTICS_SERVICE.getStats();
+    // NEW: Check liquidity analytics health
+    const liquidityGrowthStats = LIQUIDITY_GROWTH_TRACKER.getSummaryStats();
+    const liquidityAlertsStats = LIQUIDITY_MILESTONE_ALERTS.getAlertStats();
     
     // Check database
     let dbHealthy = true;
@@ -447,10 +771,16 @@ export class GrpcStreamApplication {
     // Check metadata service health
     const metadataHealthy = metadataStats.processingQueue < 100 && metadataStats.retryQueue < 50;
 
-    // NEW: Check holder analytics service health
+    // Check holder analytics service health
     const holderAnalyticsHealthy = holderStats.processingQueue < 50 && holderStats.retryQueue < 25;
+
+    // NEW: Check liquidity analytics health
+    const liquidityAnalyticsHealthy = 
+      liquidityGrowthStats.totalTokens < 1000 && // Reasonable memory usage
+      liquidityAlertsStats.trackedTokens < 500;   // Reasonable alert tracking
     
-    const healthy = dbHealthy && stats.grpcConnected && dataFresh && metadataHealthy && holderAnalyticsHealthy;
+    const healthy = dbHealthy && stats.grpcConnected && dataFresh && metadataHealthy && 
+                   holderAnalyticsHealthy && liquidityAnalyticsHealthy;
     
     return {
       healthy,
@@ -458,12 +788,31 @@ export class GrpcStreamApplication {
       grpcConnected: stats.grpcConnected,
       dataFresh,
       metadataHealthy,
-      holderAnalyticsHealthy, // NEW
+      holderAnalyticsHealthy,
+      liquidityAnalyticsHealthy, // NEW
       timeSinceLastFlush,
       errors: stats.errors,
       metadata: metadataStats,
-      holderAnalytics: holderStats // NEW
+      holderAnalytics: holderStats,
+      liquidityAnalytics: { // NEW
+        growth: liquidityGrowthStats,
+        alerts: liquidityAlertsStats
+      }
     };
+  }
+
+  /**
+   * NEW: Helper to get current SOL price
+   */
+  private async getCurrentSolPrice(): Promise<number> {
+    try {
+      const solPrice = await db('sol_price_history')
+        .orderBy('timestamp', 'desc')
+        .first();
+      return solPrice?.price || 100; // Default fallback
+    } catch (error) {
+      return 100; // Default fallback
+    }
   }
   
   private setupGracefulShutdown(): void {
@@ -484,15 +833,23 @@ export class GrpcStreamApplication {
           clearInterval(this.metadataFixInterval);
         }
 
-        // NEW: Stop holder analytics interval
         if (this.holderAnalyticsInterval) {
           clearInterval(this.holderAnalyticsInterval);
+        }
+
+        // NEW: Stop liquidity analytics intervals
+        if (this.liquidityGrowthInterval) {
+          clearInterval(this.liquidityGrowthInterval);
+        }
+
+        if (this.liquidityQualityInterval) {
+          clearInterval(this.liquidityQualityInterval);
         }
         
         // Stop stream manager
         await this.streamManager.stop();
 
-        // NEW: Stop holder analytics service
+        // Stop holder analytics service
         await HOLDER_ANALYTICS_SERVICE.stop();
         
         // Stop WebSocket service
@@ -540,7 +897,7 @@ export class GrpcStreamApplication {
     }
   }
 
-  // NEW: Enhanced method to manually trigger holder analytics
+  // Enhanced method to manually trigger holder analytics
   async updateHoldersForToken(tokenAddress: string): Promise<any> {
     try {
       logger.info(`🔍 Manually updating holders for ${tokenAddress}`);
@@ -552,19 +909,68 @@ export class GrpcStreamApplication {
       return null;
     }
   }
+
+  // NEW: Manual liquidity analytics triggers
+  async updateLiquidityMetrics(tokenAddress: string): Promise<any> {
+    try {
+      logger.info(`💎 Manually updating liquidity metrics for ${tokenAddress}`);
+      
+      const [growthMetrics, qualityScore] = await Promise.all([
+        LIQUIDITY_GROWTH_TRACKER.calculateGrowthRate(tokenAddress),
+        LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(tokenAddress)
+      ]);
+      
+      logger.info(`✅ Manual liquidity update complete for ${tokenAddress}`);
+      return { growthMetrics, qualityScore };
+    } catch (error) {
+      logger.error('Error during manual liquidity update:', error);
+      return null;
+    }
+  }
+
+  async checkLiquidityMilestones(tokenAddress: string): Promise<any> {
+    try {
+      logger.info(`🎯 Manually checking liquidity milestones for ${tokenAddress}`);
+      
+      const tokenData = await db('tokens').where('address', tokenAddress).first();
+      if (!tokenData) {
+        throw new Error('Token not found');
+      }
+      
+      const milestones = await LIQUIDITY_MILESTONE_ALERTS.checkMilestones(tokenAddress, {
+        liquidity_usd: tokenData.liquidity * await this.getCurrentSolPrice(),
+        real_sol_reserves: tokenData.liquidity * 1e9,
+        timestamp: new Date()
+      });
+      
+      logger.info(`✅ Manual milestone check complete for ${tokenAddress}: ${milestones.length} alerts`);
+      return milestones;
+    } catch (error) {
+      logger.error('Error during manual milestone check:', error);
+      return [];
+    }
+  }
   
   // ENHANCED: Get comprehensive system status
   async getSystemStatus() {
     const streamStats = this.streamManager.getStats();
     const metadataStats = HELIUS_METADATA_SERVICE.getStats();
-    const holderStats = HOLDER_ANALYTICS_SERVICE.getStats(); // NEW
-    const holderSummary = await HOLDER_ANALYTICS_SERVICE.getHolderSummary(10); // NEW
+    const holderStats = HOLDER_ANALYTICS_SERVICE.getStats();
+    const holderSummary = await HOLDER_ANALYTICS_SERVICE.getHolderSummary(10);
+    // NEW: Get liquidity analytics status
+    const liquidityGrowthStats = LIQUIDITY_GROWTH_TRACKER.getSummaryStats();
+    const liquidityAlertsStats = LIQUIDITY_MILESTONE_ALERTS.getAlertStats();
     
     return {
       stream: streamStats,
       metadata: metadataStats,
-      holderAnalytics: holderStats, // NEW
-      holderSummary: holderSummary, // NEW
+      holderAnalytics: holderStats,
+      holderSummary: holderSummary,
+      // NEW: Liquidity analytics status
+      liquidityAnalytics: {
+        growth: liquidityGrowthStats,
+        alerts: liquidityAlertsStats
+      },
       uptime: process.uptime(),
       memoryUsage: process.memoryUsage(),
       timestamp: new Date().toISOString()
@@ -577,10 +983,24 @@ export class GrpcStreamApplication {
     logger.info(`📝 Manually queued metadata fetch: ${tokenAddress.substring(0, 8)}...`);
   }
 
-  // NEW: Queue specific token for holder analysis
+  // Queue specific token for holder analysis
   queueTokenForHolderAnalysis(tokenAddress: string, priority: 'HIGH' | 'MEDIUM' | 'LOW' = 'MEDIUM'): void {
     HOLDER_ANALYTICS_SERVICE.queueTokenForHolderAnalysis(tokenAddress, priority);
     logger.info(`📊 Manually queued holder analysis: ${tokenAddress.substring(0, 8)}... (${priority})`);
+  }
+
+  // NEW: Queue specific token for liquidity analytics
+  queueTokenForLiquidityAnalysis(tokenAddress: string): void {
+    // Queue for both growth tracking and quality scoring
+    setTimeout(async () => {
+      try {
+        await LIQUIDITY_GROWTH_TRACKER.getGrowthMetrics(tokenAddress);
+        await LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(tokenAddress);
+        logger.info(`💎 Liquidity analytics queued for: ${tokenAddress.substring(0, 8)}...`);
+      } catch (error) {
+        logger.error(`Error in liquidity analytics for ${tokenAddress}:`, error);
+      }
+    }, 1000);
   }
 }
 
