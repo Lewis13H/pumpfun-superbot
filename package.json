@@ -9,6 +9,8 @@
     "dashboard:fixed": "ts-node src/dashboard/start-dashboard-fixed.ts",
     "monitor": "ts-node src/dashboard/monitor.ts",
     "dashboard:standalone": "ts-node src/dashboard/standalone-dashboard.ts",
+    "volume-dashboard": "ts-node src/dashboard/volume-analytics-dashboard.ts",
+    "bot-v427": "ts-node src/grpc/grpc-stream-app.ts",
     "dashboard:prod": "node dist/dashboard/start-dashboard.js",
     "dev": "nodemon --exec ts-node src/index.ts",
     "dev:full": "node start-dev.js",

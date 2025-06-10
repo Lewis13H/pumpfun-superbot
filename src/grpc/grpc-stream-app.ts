@@ -1,4 +1,4 @@
-// src/grpc/grpc-stream-app.ts - ENHANCED WITH LIQUIDITY ANALYTICS v4.26
+// src/grpc/grpc-stream-app.ts - ENHANCED WITH LIQUIDITY + VOLUME ANALYTICS v4.27
 
 import { GrpcStreamManager } from './grpc-stream-manager';
 import { db } from '../database/postgres';
@@ -13,10 +13,13 @@ import { HOLDER_ANALYTICS_SERVICE } from '../services/token-holder-analytics-ser
 // Import Helius metadata service
 const { HELIUS_METADATA_SERVICE } = require('../services/multi-source-metadata-service');
 
-// NEW: Import enhanced liquidity services
+// Import enhanced liquidity services
 import { LIQUIDITY_GROWTH_TRACKER } from '../services/liquidity-growth-tracker';
 import { LIQUIDITY_QUALITY_SCORER } from '../services/liquidity-quality-scorer';
 import { LIQUIDITY_MILESTONE_ALERTS } from '../services/liquidity-milestone-alerts';
+
+// NEW V4.27: Import volume analytics service
+import { VOLUME_ANALYTICS_SERVICE } from '../services/volume-analytics-service';
 
 export class GrpcStreamApplication {
   private streamManager: GrpcStreamManager;
@@ -27,9 +30,11 @@ export class GrpcStreamApplication {
   private healthCheckInterval?: NodeJS.Timeout;
   private metadataFixInterval?: NodeJS.Timeout;
   private holderAnalyticsInterval?: NodeJS.Timeout;
-  // NEW: Liquidity analytics intervals
+  // Liquidity analytics intervals
   private liquidityGrowthInterval?: NodeJS.Timeout;
   private liquidityQualityInterval?: NodeJS.Timeout;
+  // NEW V4.27: Volume analytics interval
+  private volumeAnalyticsInterval?: NodeJS.Timeout;
   
   constructor() {
     // Initialize without passing db - they'll use their own instances
@@ -53,14 +58,14 @@ export class GrpcStreamApplication {
   }
   
   private setupEventHandlers(): void {
-    // Handle new tokens - ENHANCED WITH LIQUIDITY TRACKING
+    // Handle new tokens - ENHANCED WITH LIQUIDITY + VOLUME TRACKING
     this.streamManager.on('newToken', async (token: any) => {
       logger.info(`🎉 New token discovered: ${token.address.substring(0, 8)}... | Metadata & analytics queuing...`);
       
       // Queue for holder analysis  
       HOLDER_ANALYTICS_SERVICE.queueTokenForHolderAnalysis(token.address, 'HIGH');
       
-      // NEW: Initialize liquidity tracking for new tokens
+      // Initialize liquidity tracking for new tokens
       LIQUIDITY_MILESTONE_ALERTS.emit('newTokenDetected', {
         tokenAddress: token.address,
         initialLiquidity: 0,
@@ -131,7 +136,7 @@ export class GrpcStreamApplication {
       }
     });
 
-    // NEW: Handle liquidity milestone alerts
+    // Handle liquidity milestone alerts
     LIQUIDITY_MILESTONE_ALERTS.on('milestoneAlert', async (alert: any) => {
       const tokenData = await db('tokens').where('address', alert.tokenAddress).first();
       const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
@@ -149,7 +154,7 @@ export class GrpcStreamApplication {
       }
     });
 
-    // NEW: Handle critical liquidity milestones
+    // Handle critical liquidity milestones
     LIQUIDITY_MILESTONE_ALERTS.on('criticalMilestone', async (alert: any) => {
       const tokenData = await db('tokens').where('address', alert.tokenAddress).first();
       const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
@@ -191,7 +196,7 @@ export class GrpcStreamApplication {
       }
     });
 
-    // NEW: Handle high quality liquidity events
+    // Handle high quality liquidity events
     this.streamManager.on('highQualityLiquidity', async (data: any) => {
       const tokenData = await db('tokens').where('address', data.tokenAddress).first();
       const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
@@ -208,7 +213,7 @@ export class GrpcStreamApplication {
       }
     });
 
-    // NEW: Handle liquidity momentum events
+    // Handle liquidity momentum events
     this.streamManager.on('liquidityMomentum', async (data: any) => {
       const tokenData = await db('tokens').where('address', data.tokenAddress).first();
       const displaySymbol = tokenData?.symbol && tokenData.symbol !== 'LOADING...'
@@ -247,8 +252,62 @@ export class GrpcStreamApplication {
         }, 3000);
       }
     });
+
+    // NEW V4.27: Handle volume alerts
+    this.streamManager.on('volumeAlert', async (alert: any) => {
+      logger.info(`📊 Volume Alert: ${alert.symbol} - ${alert.message}`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('volumeAlert', alert);
+      }
+    });
+
+    // NEW V4.27: Handle critical volume alerts
+    this.streamManager.on('criticalVolumeAlert', async (alert: any) => {
+      logger.info(`🚨 Critical Volume Alert: ${alert.symbol} - ${alert.message}`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('criticalVolumeAlert', alert);
+      }
+    });
+
+    // NEW V4.27: Handle volume-triggered buy signals
+    this.streamManager.on('volumeTriggeredBuySignal', async (data: any) => {
+      logger.info(`🚨 VOLUME-TRIGGERED BUY SIGNAL: ${data.token.symbol || data.token.address.substring(0,8)+'...'}`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('volumeTriggeredBuySignal', data);
+      }
+    });
+
+    // NEW V4.27: Handle volume spikes
+    this.streamManager.on('volumeSpike', async (alert: any) => {
+      logger.info(`📈 Volume Spike: ${alert.symbol} - ${alert.details.percentageChange.toFixed(1)}% above average`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('volumeSpike', alert);
+      }
+    });
+
+    // NEW V4.27: Handle volume imbalances
+    this.streamManager.on('volumeImbalance', async (alert: any) => {
+      logger.info(`⚖️ Volume Imbalance: ${alert.symbol} - ${alert.message}`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('volumeImbalance', alert);
+      }
+    });
+
+    // NEW V4.27: Handle unusual volume patterns
+    this.streamManager.on('unusualVolumePattern', async (alert: any) => {
+      logger.info(`🔍 Unusual Volume Pattern: ${alert.symbol} - ${alert.message}`);
+      
+      if (this.wsService) {
+        this.wsService.broadcast('unusualVolumePattern', alert);
+      }
+    });
     
-    // Handle buy signals - ENHANCED WITH LIQUIDITY DATA CONTEXT
+    // Handle buy signals - ENHANCED WITH LIQUIDITY + VOLUME DATA CONTEXT
     this.streamManager.on('buySignal', async ({ token, signal }: { token: any; signal: any }) => {
       // Get updated token symbol for display
       const tokenData = await db('tokens').where('address', token.address).first();
@@ -256,14 +315,14 @@ export class GrpcStreamApplication {
         ? tokenData.symbol
         : token.address.substring(0, 8) + '...';
       
-      // Enhanced logging with liquidity context
+      // Enhanced logging with liquidity + volume context
       logger.info(`💰 Buy signal for ${displaySymbol}: ${signal.reason}`, {
         marketCap: signal.marketCap,
         liquidity: signal.liquidity,
         holders: signal.holders,
         concentration: signal.top10Percent + '%',
         solsniffer: signal.solsnifferScore,
-        // NEW: Liquidity quality context
+        // Liquidity quality context
         liquidityGrade: signal.liquidityQualityScore?.grade,
         liquidityMomentum: signal.liquidityGrowthMetrics?.momentum,
         riskLevel: signal.riskLevel,
@@ -282,7 +341,7 @@ export class GrpcStreamApplication {
               top25Concentration: tokenData?.top_25_percent,
               lastUpdated: tokenData?.holder_last_updated
             },
-            // NEW: Enhanced liquidity context
+            // Enhanced liquidity context
             liquidityContext: {
               qualityGrade: signal.liquidityQualityScore?.grade,
               qualityScore: signal.liquidityQualityScore?.overallScore,
@@ -298,14 +357,14 @@ export class GrpcStreamApplication {
       // Could trigger automated trading here
     });
 
-    // Handle category changes - queue liquidity analysis for new AIM tokens
+    // Handle category changes - queue liquidity + volume analysis for new AIM tokens
     this.streamManager.on('categoryChanged', async (data: any) => {
       // When a token moves to AIM category, prioritize all analytics
       if (data.toCategory === 'AIM') {
         logger.info(`🎯 Token moved to AIM: ${data.tokenAddress} - prioritizing all analytics`);
         HOLDER_ANALYTICS_SERVICE.queueTokenForHolderAnalysis(data.tokenAddress, 'HIGH');
         
-        // NEW: Calculate initial liquidity quality for AIM tokens
+        // Calculate initial liquidity quality for AIM tokens
         setTimeout(async () => {
           try {
             const qualityScore = await LIQUIDITY_QUALITY_SCORER.scoreLiquidityQuality(data.tokenAddress);
@@ -324,10 +383,20 @@ export class GrpcStreamApplication {
             logger.error('Error calculating liquidity quality for new AIM token:', error);
           }
         }, 10000); // After 10 seconds to allow price data to accumulate
+
+        // NEW V4.27: Initialize volume analytics for new AIM tokens
+        setTimeout(async () => {
+          try {
+            await VOLUME_ANALYTICS_SERVICE.calculateVolumeMetrics(data.tokenAddress, '1h');
+            logger.info(`📊 Volume analytics initialized for new AIM token: ${data.tokenAddress.substring(0,8)}...`);
+          } catch (error) {
+            logger.error('Error initializing volume analytics for new AIM token:', error);
+          }
+        }, 15000); // After 15 seconds to allow transaction data to accumulate
       }
     });
     
-    // Handle price movements - ENHANCED WITH LIQUIDITY REFRESH LOGIC
+    // Handle price movements - ENHANCED WITH LIQUIDITY + VOLUME REFRESH LOGIC
     this.streamManager.on('pumpDetected', async (data: any) => {
       // Get token symbol for better logging
       const tokenData = await db('tokens').where('address', data.tokenAddress).first();
@@ -342,7 +411,7 @@ export class GrpcStreamApplication {
         logger.info(`📊 Significant pump detected - refreshing all analytics for ${displaySymbol}`);
         HOLDER_ANALYTICS_SERVICE.queueTokenForHolderAnalysis(data.tokenAddress, 'HIGH');
         
-        // NEW: Check if pump created liquidity milestones
+        // Check if pump created liquidity milestones
         setTimeout(async () => {
           try {
             const currentTokenData = await db('tokens').where('address', data.tokenAddress).first();
@@ -357,6 +426,18 @@ export class GrpcStreamApplication {
             logger.error('Error checking liquidity milestones after pump:', error);
           }
         }, 5000);
+
+        // NEW V4.27: Trigger volume analytics recalculation after pump
+        setTimeout(async () => {
+          try {
+            const volumeMetrics = await VOLUME_ANALYTICS_SERVICE.calculateVolumeMetrics(data.tokenAddress, '1h');
+            if (volumeMetrics) {
+              await VOLUME_ANALYTICS_SERVICE.checkVolumeAlerts(data.tokenAddress, volumeMetrics);
+            }
+          } catch (error) {
+            logger.error('Error checking volume metrics after pump:', error);
+          }
+        }, 7000);
       }
       
       if (this.wsService) {
@@ -421,7 +502,7 @@ export class GrpcStreamApplication {
   }
   
   async start(): Promise<void> {
-    logger.info('🚀 Starting gRPC Stream Application v4.26 with Enhanced Liquidity Analytics...');
+    logger.info('🚀 Starting gRPC Stream Application v4.27 with Enhanced Liquidity + Volume Analytics...');
     
     try {
       // Initialize services
@@ -436,7 +517,7 @@ export class GrpcStreamApplication {
       // Setup graceful shutdown
       this.setupGracefulShutdown();
       
-      logger.info('✅ gRPC Stream Application v4.26 started successfully');
+      logger.info('✅ gRPC Stream Application v4.27 started successfully');
       
     } catch (error) {
       logger.error('Failed to start application:', error);
@@ -467,13 +548,21 @@ export class GrpcStreamApplication {
     const hasHolderColumns = holderColumnsCheck.rows.length === 4;
     logger.info(`✅ Holder analytics columns: ${hasHolderColumns ? 'Present' : 'Missing - run migration'}`);
 
-    // NEW: Check liquidity analytics tables
+    // Check liquidity analytics tables
     const liquidityTablesCheck = await db.raw(`
       SELECT table_name 
       FROM information_schema.tables 
       WHERE table_name IN ('liquidity_milestone_alerts', 'liquidity_growth_snapshots', 'buy_evaluations')
     `);
     logger.info(`✅ Liquidity analytics tables: ${liquidityTablesCheck.rows.length}/3 present`);
+
+    // NEW V4.27: Check volume analytics tables
+    const volumeTablesCheck = await db.raw(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_name IN ('volume_alerts')
+    `);
+    logger.info(`✅ Volume analytics tables: ${volumeTablesCheck.rows.length}/1 present`);
     
     // Initialize SOL price service
     await SOL_PRICE_SERVICE.initialize();
@@ -486,11 +575,15 @@ export class GrpcStreamApplication {
     await HOLDER_ANALYTICS_SERVICE.start();
     logger.info('✅ Holder analytics service initialized');
 
-    // NEW: Initialize enhanced liquidity services
+    // Initialize enhanced liquidity services
     // Note: These are singletons that initialize automatically
     logger.info('✅ Liquidity growth tracker initialized');
     logger.info('✅ Liquidity quality scorer initialized');
     logger.info('✅ Liquidity milestone alerts initialized');
+
+    // NEW V4.27: Initialize Volume Analytics Service
+    await VOLUME_ANALYTICS_SERVICE.start();
+    logger.info('✅ Volume Analytics Service initialized');
     
     // Fix missing metadata on startup (after delay)
     setTimeout(async () => {
@@ -514,7 +607,7 @@ export class GrpcStreamApplication {
       }
     }, 45000); // After 45 seconds
 
-    // NEW: Initialize liquidity analytics for existing AIM tokens
+    // Initialize liquidity analytics for existing AIM tokens
     setTimeout(async () => {
       try {
         logger.info('💎 Starting initial liquidity analytics...');
@@ -537,6 +630,30 @@ export class GrpcStreamApplication {
         logger.error('Error during startup liquidity analytics:', error);
       }
     }, 60000); // After 60 seconds
+
+    // NEW V4.27: Initialize volume analytics for existing high-activity tokens
+    setTimeout(async () => {
+      try {
+        logger.info('📈 Starting initial volume analytics...');
+        const highActivityTokens = await db('tokens')
+          .whereIn('category', ['MEDIUM', 'HIGH', 'AIM'])
+          .where('last_price_update', '>', new Date(Date.now() - 30 * 60 * 1000)) // Updated in last 30 minutes
+          .orderBy('market_cap', 'desc')
+          .limit(25)
+          .pluck('address');
+          
+        for (const tokenAddress of highActivityTokens) {
+          try {
+            await VOLUME_ANALYTICS_SERVICE.calculateVolumeMetrics(tokenAddress, '1h');
+          } catch (error) {
+            logger.debug(`Error calculating initial volume metrics for ${tokenAddress}:`, error);
+          }
+        }
+        logger.info(`✅ Calculated initial volume metrics for ${highActivityTokens.length} high-activity tokens`);
+      } catch (error) {
+        logger.error('Error during startup volume analytics:', error);
+      }
+    }, 75000); // After 75 seconds (after other services)
     
     // Initialize WebSocket service if enabled
     if (config.WEBSOCKET_ENABLED) {
@@ -552,9 +669,10 @@ export class GrpcStreamApplication {
       const stats = this.streamManager.getStats();
       const metadataStats = HELIUS_METADATA_SERVICE.getStats();
       const holderStats = HOLDER_ANALYTICS_SERVICE.getStats();
-      // NEW: Get liquidity analytics stats
       const liquidityGrowthStats = LIQUIDITY_GROWTH_TRACKER.getSummaryStats();
       const liquidityAlertsStats = LIQUIDITY_MILESTONE_ALERTS.getAlertStats();
+      // NEW V4.27: Get volume analytics stats
+      const volumeStats = VOLUME_ANALYTICS_SERVICE.getStats();
 
       // Get holder analytics summary
       const holderSummary = await db.raw('SELECT * FROM get_holder_analytics_stats()');
@@ -578,12 +696,24 @@ export class GrpcStreamApplication {
           retrying: holderStats.retryQueue,
           requestDelay: holderStats.requestDelay
         },
-        // NEW: Liquidity analytics stats
         liquidityAnalytics: {
           growth: liquidityGrowthStats,
           alerts: liquidityAlertsStats
-        }
+        },
+        // NEW V4.27: Volume analytics stats
+        volumeAnalytics: volumeStats
       });
+
+      // NEW V4.27: Log volume analytics summary
+      if (volumeStats.tokensTracked > 0) {
+        logger.info('📈 Volume Analytics Summary:', {
+          tokensTracked: volumeStats.tokensTracked,
+          alertsTriggered: volumeStats.alertsTriggered,
+          totalCalculations: volumeStats.totalCalculations,
+          processingErrors: volumeStats.processingErrors,
+          lastUpdateTime: volumeStats.lastUpdateTime
+        });
+      }
 
       // Log liquidity analytics summary
       if (liquidityGrowthStats.totalTokens > 0) {
@@ -607,11 +737,12 @@ export class GrpcStreamApplication {
           metadata: metadataStats,
           holderAnalytics: holderStats,
           holderSummary: holderSummary.rows,
-          // NEW: Include liquidity analytics
           liquidityAnalytics: {
             growth: liquidityGrowthStats,
             alerts: liquidityAlertsStats
-          }
+          },
+          // NEW V4.27: Include volume analytics
+          volumeAnalytics: volumeStats
         });
       }
     }, 30000); // Every 30 seconds
@@ -638,7 +769,7 @@ export class GrpcStreamApplication {
       }
     }, 3 * 60 * 1000); // Every 3 minutes
 
-    // NEW: Periodic liquidity growth tracking (every 2 minutes)
+    // Periodic liquidity growth tracking (every 2 minutes)
     this.liquidityGrowthInterval = setInterval(async () => {
       try {
         // Get high-activity AIM tokens for growth tracking
@@ -663,7 +794,7 @@ export class GrpcStreamApplication {
       }
     }, 2 * 60 * 1000); // Every 2 minutes
 
-    // NEW: Periodic liquidity quality assessment for AIM tokens (every 5 minutes)
+    // Periodic liquidity quality assessment for AIM tokens (every 5 minutes)
     this.liquidityQualityInterval = setInterval(async () => {
       try {
         // Get AIM tokens that haven't been quality-assessed recently
@@ -707,6 +838,44 @@ export class GrpcStreamApplication {
         logger.error('Error during periodic liquidity quality assessment:', error);
       }
     }, 5 * 60 * 1000); // Every 5 minutes
+
+    // NEW V4.27: Volume analytics summary (every 10 minutes)
+    this.volumeAnalyticsInterval = setInterval(async () => {
+      try {
+        // Get volume leaderboard for different timeframes
+        const leaderboard1h = await VOLUME_ANALYTICS_SERVICE.getVolumeLeaderboard('1h');
+        const leaderboard24h = await VOLUME_ANALYTICS_SERVICE.getVolumeLeaderboard('24h');
+        
+        if (leaderboard1h.length > 0) {
+          logger.info('📈 TOP VOLUME PERFORMERS (1h):');
+          for (let i = 0; i < Math.min(5, leaderboard1h.length); i++) {
+            const metrics = leaderboard1h[i];
+            const tokenData = await db('tokens').where('address', metrics.tokenAddress).first();
+            const symbol = tokenData?.symbol || metrics.tokenAddress.substring(0, 8) + '...';
+            logger.info(`   ${i + 1}. ${symbol} | $${metrics.totalVolumeUsd.toFixed(0)} | ${metrics.totalTransactions} txs | ${metrics.buyVolumeRatio.toFixed(1)}% buys`);
+          }
+        }
+
+        // Get recent high-severity alerts
+        const recentAlerts = await VOLUME_ANALYTICS_SERVICE.getRecentAlerts(10, 'HIGH');
+        if (recentAlerts.length > 0) {
+          logger.info(`🚨 ${recentAlerts.length} HIGH-SEVERITY volume alerts in recent activity`);
+        }
+
+        // Broadcast volume summary to WebSocket clients
+        if (this.wsService) {
+          this.wsService.broadcast('volumeAnalyticsSummary', {
+            leaderboard1h: leaderboard1h.slice(0, 10),
+            leaderboard24h: leaderboard24h.slice(0, 10),
+            recentHighAlerts: recentAlerts,
+            timestamp: new Date()
+          });
+        }
+
+      } catch (error) {
+        logger.error('Error in periodic volume analytics summary:', error);
+      }
+    }, 10 * 60 * 1000); // Every 10 minutes
     
     // ENHANCED: Health check with all services
     this.healthCheckInterval = setInterval(async () => {
@@ -732,13 +901,24 @@ export class GrpcStreamApplication {
             }
           }
 
-          // NEW: Clear old liquidity data if memory issues detected
+          // Clear old liquidity data if memory issues detected
           if (!health.liquidityAnalyticsHealthy) {
             logger.info('Clearing old liquidity analytics data...');
             try {
               LIQUIDITY_MILESTONE_ALERTS.clearOldHistory(24); // Clear data older than 24 hours
             } catch (error) {
               logger.error('Failed to clear old liquidity data:', error);
+            }
+          }
+
+          // NEW V4.27: Handle volume analytics health issues
+          if (!health.volumeAnalyticsHealthy) {
+            logger.info('Restarting volume analytics service...');
+            try {
+              await VOLUME_ANALYTICS_SERVICE.stop();
+              await VOLUME_ANALYTICS_SERVICE.start();
+            } catch (error) {
+              logger.error('Failed to restart volume analytics service:', error);
             }
           }
         }
@@ -752,9 +932,10 @@ export class GrpcStreamApplication {
     const stats = this.streamManager.getStats();
     const metadataStats = HELIUS_METADATA_SERVICE.getStats();
     const holderStats = HOLDER_ANALYTICS_SERVICE.getStats();
-    // NEW: Check liquidity analytics health
     const liquidityGrowthStats = LIQUIDITY_GROWTH_TRACKER.getSummaryStats();
     const liquidityAlertsStats = LIQUIDITY_MILESTONE_ALERTS.getAlertStats();
+    // NEW V4.27: Check volume analytics health
+    const volumeStats = VOLUME_ANALYTICS_SERVICE.getStats();
     
     // Check database
     let dbHealthy = true;
@@ -774,13 +955,19 @@ export class GrpcStreamApplication {
     // Check holder analytics service health
     const holderAnalyticsHealthy = holderStats.processingQueue < 50 && holderStats.retryQueue < 25;
 
-    // NEW: Check liquidity analytics health
+    // Check liquidity analytics health
     const liquidityAnalyticsHealthy = 
       liquidityGrowthStats.totalTokens < 1000 && // Reasonable memory usage
       liquidityAlertsStats.trackedTokens < 500;   // Reasonable alert tracking
+
+    // NEW V4.27: Check volume analytics health
+    const volumeAnalyticsHealthy = 
+      volumeStats.processingErrors < 10 && // Reasonable error count
+      volumeStats.isRunning &&
+      volumeStats.tokensTracked < 1000; // Reasonable memory usage
     
     const healthy = dbHealthy && stats.grpcConnected && dataFresh && metadataHealthy && 
-                   holderAnalyticsHealthy && liquidityAnalyticsHealthy;
+                   holderAnalyticsHealthy && liquidityAnalyticsHealthy && volumeAnalyticsHealthy;
     
     return {
       healthy,
@@ -789,20 +976,22 @@ export class GrpcStreamApplication {
       dataFresh,
       metadataHealthy,
       holderAnalyticsHealthy,
-      liquidityAnalyticsHealthy, // NEW
+      liquidityAnalyticsHealthy,
+      volumeAnalyticsHealthy, // NEW V4.27
       timeSinceLastFlush,
       errors: stats.errors,
       metadata: metadataStats,
       holderAnalytics: holderStats,
-      liquidityAnalytics: { // NEW
+      liquidityAnalytics: {
         growth: liquidityGrowthStats,
         alerts: liquidityAlertsStats
-      }
+      },
+      volumeAnalytics: volumeStats // NEW V4.27
     };
   }
 
   /**
-   * NEW: Helper to get current SOL price
+   * Helper to get current SOL price
    */
   private async getCurrentSolPrice(): Promise<number> {
     try {
@@ -837,7 +1026,6 @@ export class GrpcStreamApplication {
           clearInterval(this.holderAnalyticsInterval);
         }
 
-        // NEW: Stop liquidity analytics intervals
         if (this.liquidityGrowthInterval) {
           clearInterval(this.liquidityGrowthInterval);
         }
@@ -845,12 +1033,20 @@ export class GrpcStreamApplication {
         if (this.liquidityQualityInterval) {
           clearInterval(this.liquidityQualityInterval);
         }
+
+        // NEW V4.27: Stop volume analytics interval
+        if (this.volumeAnalyticsInterval) {
+          clearInterval(this.volumeAnalyticsInterval);
+        }
         
         // Stop stream manager
         await this.streamManager.stop();
 
         // Stop holder analytics service
         await HOLDER_ANALYTICS_SERVICE.stop();
+
+        // NEW V4.27: Stop volume analytics service
+        await VOLUME_ANALYTICS_SERVICE.stop();
         
         // Stop WebSocket service
         if (this.wsService) {
@@ -910,7 +1106,7 @@ export class GrpcStreamApplication {
     }
   }
 
-  // NEW: Manual liquidity analytics triggers
+  // Manual liquidity analytics triggers
   async updateLiquidityMetrics(tokenAddress: string): Promise<any> {
     try {
       logger.info(`💎 Manually updating liquidity metrics for ${tokenAddress}`);
@@ -950,27 +1146,69 @@ export class GrpcStreamApplication {
       return [];
     }
   }
+
+  // NEW V4.27: Manual volume analytics triggers
+  async analyzeTokenVolume(tokenAddress: string): Promise<any> {
+    try {
+      logger.info(`📈 Manually analyzing volume for ${tokenAddress}`);
+      const result = await VOLUME_ANALYTICS_SERVICE.analyzeToken(tokenAddress);
+      logger.info(`✅ Manual volume analysis complete for ${tokenAddress}`);
+      return result;
+    } catch (error) {
+      logger.error('Error during manual volume analysis:', error);
+      return null;
+    }
+  }
+
+  async getVolumeLeaderboard(timeWindow: '1h' | '4h' | '24h' = '1h'): Promise<any> {
+    try {
+      return await VOLUME_ANALYTICS_SERVICE.getVolumeLeaderboard(timeWindow);
+    } catch (error) {
+      logger.error('Error getting volume leaderboard:', error);
+      return [];
+    }
+  }
+
+  async getVolumeAlerts(limit: number = 50, severity?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'): Promise<any> {
+    try {
+      return await VOLUME_ANALYTICS_SERVICE.getRecentAlerts(limit, severity);
+    } catch (error) {
+      logger.error('Error getting volume alerts:', error);
+      return [];
+    }
+  }
+
+  async getVolumeSummary(category?: 'MEDIUM' | 'HIGH' | 'AIM'): Promise<any> {
+    try {
+      return await VOLUME_ANALYTICS_SERVICE.getVolumeSummary(category);
+    } catch (error) {
+      logger.error('Error getting volume summary:', error);
+      return [];
+    }
+  }
   
-  // ENHANCED: Get comprehensive system status
+  // ENHANCED: Get comprehensive system status with volume analytics
   async getSystemStatus() {
     const streamStats = this.streamManager.getStats();
     const metadataStats = HELIUS_METADATA_SERVICE.getStats();
     const holderStats = HOLDER_ANALYTICS_SERVICE.getStats();
     const holderSummary = await HOLDER_ANALYTICS_SERVICE.getHolderSummary(10);
-    // NEW: Get liquidity analytics status
     const liquidityGrowthStats = LIQUIDITY_GROWTH_TRACKER.getSummaryStats();
     const liquidityAlertsStats = LIQUIDITY_MILESTONE_ALERTS.getAlertStats();
+    // NEW V4.27: Get volume analytics status
+    const volumeStats = VOLUME_ANALYTICS_SERVICE.getStats();
     
     return {
       stream: streamStats,
       metadata: metadataStats,
       holderAnalytics: holderStats,
       holderSummary: holderSummary,
-      // NEW: Liquidity analytics status
       liquidityAnalytics: {
         growth: liquidityGrowthStats,
         alerts: liquidityAlertsStats
       },
+      // NEW V4.27: Volume analytics status
+      volumeAnalytics: volumeStats,
       uptime: process.uptime(),
       memoryUsage: process.memoryUsage(),
       timestamp: new Date().toISOString()
@@ -989,7 +1227,7 @@ export class GrpcStreamApplication {
     logger.info(`📊 Manually queued holder analysis: ${tokenAddress.substring(0, 8)}... (${priority})`);
   }
 
-  // NEW: Queue specific token for liquidity analytics
+  // Queue specific token for liquidity analytics
   queueTokenForLiquidityAnalysis(tokenAddress: string): void {
     // Queue for both growth tracking and quality scoring
     setTimeout(async () => {
@@ -999,6 +1237,18 @@ export class GrpcStreamApplication {
         logger.info(`💎 Liquidity analytics queued for: ${tokenAddress.substring(0, 8)}...`);
       } catch (error) {
         logger.error(`Error in liquidity analytics for ${tokenAddress}:`, error);
+      }
+    }, 1000);
+  }
+
+  // NEW V4.27: Queue specific token for volume analysis
+  queueTokenForVolumeAnalysis(tokenAddress: string): void {
+    setTimeout(async () => {
+      try {
+        await VOLUME_ANALYTICS_SERVICE.calculateVolumeMetrics(tokenAddress, '1h');
+        logger.info(`📈 Volume analytics queued for: ${tokenAddress.substring(0, 8)}...`);
+      } catch (error) {
+        logger.error(`Error in volume analytics for ${tokenAddress}:`, error);
       }
     }, 1000);
   }
