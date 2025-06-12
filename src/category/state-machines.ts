@@ -1,472 +1,203 @@
-// Updated state-machines.ts to handle new categories and thresholds
+import { createMachine, assign } from 'xstate';
+import { logger } from '../utils/logger';
 
-import { createMachine, assign, StateMachine } from 'xstate';
-import { TokenCategory, categoryConfig } from '../config/category-config';
-import { logger } from '../utils/logger2';
+// Market cap thresholds
+export const MARKET_CAP_THRESHOLDS = {
+  ARCHIVE: 8000,      // Below $8k
+  LOW: 15000,         // $8k-$15k
+  MEDIUM: 25000,      // $15k-$25k
+  HIGH: 35000,        // $25k-$35k
+  AIM: 105000,        // $35k-$105k
+  GRADUATED: 105000   // Above $105k
+};
 
-// Context for token state machine
-export interface TokenContext {
+// Token context interface
+interface TokenContext {
   tokenAddress: string;
-  currentMarketCap: number;
-  categoryStartTime: number;
-  scanCount: number;
-  lastScanTime?: number;
-  metadata?: Record<string, any>;
+  marketCap: number;
+  lastUpdate: Date;
+  transitionHistory: Array<{
+    from: string;
+    to: string;
+    marketCap: number;
+    timestamp: Date;
+  }>;
 }
 
-// Events that can trigger transitions
-export type TokenEvent =
-  | { type: 'UPDATE_MARKET_CAP'; marketCap: number }
-  | { type: 'SCAN_COMPLETE' }
-  | { type: 'TIMEOUT' }
-  | { type: 'MANUAL_OVERRIDE'; category: TokenCategory; reason: string }
-  | { type: 'BUY_EXECUTED' }
-  | { type: 'FORCE_ARCHIVE'; reason: string };
+// Event types
+type TokenEvent = 
+  | { type: 'PRICE_UPDATE'; marketCap: number; timestamp: Date }
+  | { type: 'FORCE_ARCHIVE' }
+  | { type: 'MANUAL_OVERRIDE'; targetState: string };
 
-// Create the state machine factory
-export function createTokenStateMachine(tokenAddress: string): StateMachine<TokenContext, any, TokenEvent> {
-  const { thresholds, scanIntervals } = categoryConfig;
-  
+export function createTokenCategoryMachine(tokenAddress: string) {
   return createMachine<TokenContext, TokenEvent>({
     id: `token-${tokenAddress}`,
-    initial: 'LOW', // No more NEW state - tokens start at LOW if they're >= $8k
+    initial: 'LOW',
     context: {
       tokenAddress,
-      currentMarketCap: 0,
-      categoryStartTime: Date.now(),
-      scanCount: 0,
+      marketCap: 0,
+      lastUpdate: new Date(),
+      transitionHistory: []
     },
-    
     states: {
       LOW: {
-        entry: 'logCategoryEntry',
-        exit: 'logCategoryExit',
-        
-        after: {
-          [scanIntervals.LOW.duration * 1000]: {
-            target: 'ARCHIVE',
-            actions: 'logTimeout',
-          },
-        },
-        
+        entry: 'logStateEntry',
         on: {
-          UPDATE_MARKET_CAP: [
-            {
-              target: 'ARCHIVE',
-              cond: 'isBelowMinimum',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'MEDIUM',
-              cond: 'isMediumMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'HIGH',
-              cond: 'isHighMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'AIM',
-              cond: 'isAimMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'GRADUATED',
-              cond: 'isGraduatedMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              actions: 'updateMarketCap',
-            },
+          PRICE_UPDATE: [
+            { target: 'ARCHIVE', cond: 'shouldArchive', actions: 'updateContext' },
+            { target: 'MEDIUM', cond: 'shouldPromoteToMedium', actions: 'updateContext' },
+            { actions: 'updateContext' } // Stay in LOW
           ],
-          
-          SCAN_COMPLETE: [
-            {
-              target: 'ARCHIVE',
-              cond: 'exceededMaxScans',
-              actions: 'incrementScanCount',
-            },
-            {
-              actions: 'incrementScanCount',
-            },
-          ],
-          
-          FORCE_ARCHIVE: {
-            target: 'ARCHIVE',
-          },
-        },
+          FORCE_ARCHIVE: { target: 'ARCHIVE', actions: 'updateContext' }
+        }
       },
-      
       MEDIUM: {
-        entry: 'logCategoryEntry',
-        exit: 'logCategoryExit',
-        
-        after: {
-          [scanIntervals.MEDIUM.duration * 1000]: {
-            target: 'LOW',
-            actions: 'logTimeout',
-          },
-        },
-        
+        entry: 'logStateEntry',
         on: {
-          UPDATE_MARKET_CAP: [
-            {
-              target: 'ARCHIVE',
-              cond: 'isBelowMinimum',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'LOW',
-              cond: 'isLowMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'HIGH',
-              cond: 'isHighMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'AIM',
-              cond: 'isAimMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'GRADUATED',
-              cond: 'isGraduatedMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              actions: 'updateMarketCap',
-            },
+          PRICE_UPDATE: [
+            { target: 'ARCHIVE', cond: 'shouldArchive', actions: 'updateContext' },
+            { target: 'LOW', cond: 'shouldDemoteToLow', actions: 'updateContext' },
+            { target: 'HIGH', cond: 'shouldPromoteToHigh', actions: 'updateContext' },
+            { actions: 'updateContext' } // Stay in MEDIUM
           ],
-          
-          SCAN_COMPLETE: [
-            {
-              target: 'LOW',
-              cond: 'exceededMaxScans',
-              actions: 'incrementScanCount',
-            },
-            {
-              actions: 'incrementScanCount',
-            },
-          ],
-        },
+          FORCE_ARCHIVE: { target: 'ARCHIVE', actions: 'updateContext' }
+        }
       },
-      
       HIGH: {
-        entry: 'logCategoryEntry',
-        exit: 'logCategoryExit',
-        
-        after: {
-          [scanIntervals.HIGH.duration * 1000]: {
-            target: 'MEDIUM',
-            actions: 'logTimeout',
-          },
-        },
-        
+        entry: 'logStateEntry',
         on: {
-          UPDATE_MARKET_CAP: [
-            {
-              target: 'ARCHIVE',
-              cond: 'isBelowMinimum',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'MEDIUM',
-              cond: 'isMediumMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'LOW',
-              cond: 'isLowMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'AIM',
-              cond: 'isAimMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'GRADUATED',
-              cond: 'isGraduatedMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              actions: 'updateMarketCap',
-            },
+          PRICE_UPDATE: [
+            { target: 'ARCHIVE', cond: 'shouldArchive', actions: 'updateContext' },
+            { target: 'MEDIUM', cond: 'shouldDemoteToMedium', actions: 'updateContext' },
+            { target: 'AIM', cond: 'shouldPromoteToAim', actions: 'updateContext' },
+            { actions: 'updateContext' } // Stay in HIGH
           ],
-          
-          SCAN_COMPLETE: [
-            {
-              target: 'MEDIUM',
-              cond: 'exceededMaxScans',
-              actions: 'incrementScanCount',
-            },
-            {
-              actions: 'incrementScanCount',
-            },
-          ],
-        },
+          FORCE_ARCHIVE: { target: 'ARCHIVE', actions: 'updateContext' }
+        }
       },
-      
       AIM: {
-        entry: ['logCategoryEntry', 'notifyAimEntry'],
-        exit: 'logCategoryExit',
-        
-        after: {
-          [scanIntervals.AIM.duration * 1000]: {
-            target: 'HIGH',
-            cond: 'isHighMarketCap',
-            actions: 'logTimeout',
-          },
-        },
-        
+        entry: ['logStateEntry', 'notifyAimEntry'],
         on: {
-          UPDATE_MARKET_CAP: [
-            {
-              target: 'GRADUATED',
-              cond: 'isGraduatedMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'HIGH',
-              cond: 'isHighMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'MEDIUM',
-              cond: 'isMediumMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'LOW',
-              cond: 'isLowMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'ARCHIVE',
-              cond: 'isBelowMinimum',
-              actions: 'updateMarketCap',
-            },
-            {
-              actions: 'updateMarketCap',
-            },
+          PRICE_UPDATE: [
+            { target: 'ARCHIVE', cond: 'shouldArchive', actions: 'updateContext' },
+            { target: 'HIGH', cond: 'shouldDemoteToHigh', actions: 'updateContext' },
+            { target: 'GRADUATED', cond: 'shouldGraduate', actions: 'updateContext' },
+            { actions: 'updateContext' } // Stay in AIM
           ],
-          
-          BUY_EXECUTED: {
-            target: 'COMPLETE',
-            actions: 'logBuyExecution',
-          },
-          
-          SCAN_COMPLETE: [
-            {
-              target: 'HIGH',
-              cond: 'exceededMaxScans',
-              actions: 'incrementScanCount',
-            },
-            {
-              actions: 'incrementScanCount',
-            },
-          ],
-        },
+          FORCE_ARCHIVE: { target: 'ARCHIVE', actions: 'updateContext' }
+        }
       },
-      
       GRADUATED: {
-        entry: ['logCategoryEntry', 'notifyGraduation'],
-        exit: 'logCategoryExit',
-        
-        after: {
-          [scanIntervals.GRADUATED.duration * 1000]: {
-            target: 'ARCHIVE',
-            actions: 'logTimeout',
-          },
-        },
-        
+        entry: ['logStateEntry', 'notifyGraduation'],
         on: {
-          UPDATE_MARKET_CAP: [
-            {
-              target: 'AIM',
-              cond: 'isAimMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'HIGH',
-              cond: 'isHighMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'MEDIUM',
-              cond: 'isMediumMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'LOW',
-              cond: 'isLowMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'ARCHIVE',
-              cond: 'isBelowMinimum',
-              actions: 'updateMarketCap',
-            },
-            {
-              actions: 'updateMarketCap',
-            },
-          ],
-          
-          SCAN_COMPLETE: [
-            {
-              target: 'ARCHIVE',
-              cond: 'exceededMaxScans',
-              actions: 'incrementScanCount',
-            },
-            {
-              actions: 'incrementScanCount',
-            },
-          ],
-        },
+          PRICE_UPDATE: [
+            { target: 'AIM', cond: 'shouldDemoteFromGraduated', actions: 'updateContext' },
+            { actions: 'updateContext' } // Stay in GRADUATED
+          ]
+        }
       },
-      
       ARCHIVE: {
-        entry: 'logCategoryEntry',
-        
-        after: {
-          [scanIntervals.ARCHIVE.duration * 1000]: {
-            target: 'BIN',
-            actions: 'logTimeout',
-          },
-        },
-        
-        on: {
-          UPDATE_MARKET_CAP: [
-            {
-              target: 'LOW',
-              cond: 'isRecovering',
-              actions: 'updateMarketCap',
-            },
-            {
-              actions: 'updateMarketCap',
-            },
-          ],
-          
-          SCAN_COMPLETE: [
-            {
-              target: 'BIN',
-              cond: 'exceededMaxScans',
-              actions: 'incrementScanCount',
-            },
-            {
-              actions: 'incrementScanCount',
-            },
-          ],
-        },
-      },
-      
-      BIN: {
-        type: 'final',
-        entry: 'logCategoryEntry',
-      },
-      
-      COMPLETE: {
-        type: 'final',
-        entry: 'logCategoryEntry',
-      },
-    },
+        entry: 'logStateEntry',
+        type: 'final'
+      }
+    }
   }, {
     guards: {
-      isBelowMinimum: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap < thresholds.MIN_MARKET_CAP;
+      // Archive conditions
+      shouldArchive: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap < MARKET_CAP_THRESHOLDS.ARCHIVE;
       },
       
-      isLowMarketCap: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap >= thresholds.LOW_MIN && 
-               event.marketCap < thresholds.LOW_MAX;
+      // LOW state transitions
+      shouldPromoteToMedium: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap >= MARKET_CAP_THRESHOLDS.LOW && 
+               event.marketCap < MARKET_CAP_THRESHOLDS.MEDIUM;
       },
       
-      isMediumMarketCap: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap >= thresholds.LOW_MAX &&
-               event.marketCap < thresholds.MEDIUM_MAX;
+      // MEDIUM state transitions
+      shouldDemoteToLow: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap >= MARKET_CAP_THRESHOLDS.ARCHIVE && 
+               event.marketCap < MARKET_CAP_THRESHOLDS.LOW;
+      },
+      shouldPromoteToHigh: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap >= MARKET_CAP_THRESHOLDS.MEDIUM && 
+               event.marketCap < MARKET_CAP_THRESHOLDS.HIGH;
       },
       
-      isHighMarketCap: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap >= thresholds.MEDIUM_MAX &&
-               event.marketCap < thresholds.HIGH_MAX;
+      // HIGH state transitions
+      shouldDemoteToMedium: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap >= MARKET_CAP_THRESHOLDS.LOW && 
+               event.marketCap < MARKET_CAP_THRESHOLDS.MEDIUM;
+      },
+      shouldPromoteToAim: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap >= MARKET_CAP_THRESHOLDS.HIGH && 
+               event.marketCap < MARKET_CAP_THRESHOLDS.AIM;
       },
       
-      isAimMarketCap: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap >= thresholds.AIM_MIN &&
-               event.marketCap <= thresholds.AIM_MAX;
+      // AIM state transitions
+      shouldDemoteToHigh: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap >= MARKET_CAP_THRESHOLDS.MEDIUM && 
+               event.marketCap < MARKET_CAP_THRESHOLDS.HIGH;
+      },
+      shouldGraduate: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap >= MARKET_CAP_THRESHOLDS.GRADUATED;
       },
       
-      isGraduatedMarketCap: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap > thresholds.AIM_MAX;
-      },
-      
-      isRecovering: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        // Token needs to recover to at least LOW threshold to exit ARCHIVE
-        return event.marketCap >= thresholds.LOW_MIN;
-      },
-      
-      exceededMaxScans: (context) => {
-        const state = context as any;
-        const category = state.value as TokenCategory;
-        const maxScans = scanIntervals[category]?.maxScans || Infinity;
-        return context.scanCount >= maxScans;
-      },
+      // GRADUATED state transitions
+      shouldDemoteFromGraduated: (context, event) => {
+        if (event.type !== 'PRICE_UPDATE') return false;
+        return event.marketCap < MARKET_CAP_THRESHOLDS.GRADUATED && 
+               event.marketCap >= MARKET_CAP_THRESHOLDS.HIGH;
+      }
     },
-    
     actions: {
-      updateMarketCap: assign({
-        currentMarketCap: (_, event) =>
-          event.type === 'UPDATE_MARKET_CAP' ? event.marketCap : 0,
-        lastScanTime: () => Date.now(),
+      updateContext: assign((context, event) => {
+        if (event.type === 'PRICE_UPDATE') {
+          return {
+            ...context,
+            marketCap: event.marketCap,
+            lastUpdate: event.timestamp
+          };
+        }
+        return context;
       }),
       
-      incrementScanCount: assign({
-        scanCount: (context) => context.scanCount + 1,
-        lastScanTime: () => Date.now(),
-      }),
-      
-      logCategoryEntry: assign({
-        categoryStartTime: () => Date.now(), // Reset timer when entering new category
-      }),
-      
-      logCategoryExit: (context, event, { state }) => {
-        logger.info(`Token ${context.tokenAddress} exiting ${state.value}`);
-      },
-      
-      logTimeout: (context) => {
-        logger.info(`Token ${context.tokenAddress} timed out`);
+      logStateEntry: (context, event, { state }) => {
+        logger.info(`Token ${context.tokenAddress} entered ${state.value} state`);
       },
       
       notifyAimEntry: (context) => {
-        logger.info(`🎯 Token ${context.tokenAddress} entered AIM zone! ($35k-$105k)`);
+        logger.info(`🎯 Token ${context.tokenAddress} reached AIM category! Market cap: $${context.marketCap}`);
       },
       
       notifyGraduation: (context) => {
-        logger.info(`🎓 Token ${context.tokenAddress} GRADUATED! (>$105k)`);
-      },
-      
-      logBuyExecution: (context) => {
-        logger.info(`💰 Buy executed for token ${context.tokenAddress}`);
-      },
-    },
+        logger.info(`🎓 Token ${context.tokenAddress} GRADUATED! Market cap: $${context.marketCap}`);
+      }
+    }
   });
 }
 
-// Type guard functions
-export function isTokenEvent(event: any): event is TokenEvent {
-  return event && typeof event.type === 'string';
+// Helper function to determine category from market cap
+export function determineCategoryFromMarketCap(marketCap: number): string {
+  if (marketCap < MARKET_CAP_THRESHOLDS.ARCHIVE) return 'ARCHIVE';
+  if (marketCap < MARKET_CAP_THRESHOLDS.LOW) return 'LOW';
+  if (marketCap < MARKET_CAP_THRESHOLDS.MEDIUM) return 'MEDIUM';
+  if (marketCap < MARKET_CAP_THRESHOLDS.HIGH) return 'HIGH';
+  if (marketCap < MARKET_CAP_THRESHOLDS.AIM) return 'AIM';
+  return 'GRADUATED';
 }
 
-export function isMarketCapEvent(event: TokenEvent): event is { type: 'UPDATE_MARKET_CAP'; marketCap: number } {
-  return event.type === 'UPDATE_MARKET_CAP';
-}
+// Valid states for validation
+export const VALID_STATES = ['LOW', 'MEDIUM', 'HIGH', 'AIM', 'GRADUATED', 'ARCHIVE'];
+
+// Export types
+export type { TokenContext, TokenEvent };

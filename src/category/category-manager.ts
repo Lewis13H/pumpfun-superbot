@@ -1,386 +1,460 @@
-import { interpret, Interpreter, State } from 'xstate';
-import { TokenCategory, categoryConfig } from '../config/category-config';
-import { createTokenStateMachine, TokenContext, TokenEvent } from './state-machines';
-import { db } from '../database/postgres';
-import { logger } from '../utils/logger2';
 import { EventEmitter } from 'events';
+import { interpret, Interpreter, State } from 'xstate';
+import { db } from  '../database/postgres';
+import { logger } from '../utils/logger';
+import { 
+  createTokenCategoryMachine, 
+  determineCategoryFromMarketCap,
+  VALID_STATES,
+  MARKET_CAP_THRESHOLDS,
+  TokenContext,
+  TokenEvent
+} from './state-machines';
 
-// Type for state machine service
-type TokenService = Interpreter<TokenContext, any, TokenEvent, any, any>;
+interface CategoryChangeEvent {
+  tokenAddress: string;
+  fromCategory: string;
+  toCategory: string;
+  marketCap: number;
+  reason: string;
+  timestamp: Date;
+}
+
+interface Token {
+  address: string;
+  symbol?: string;
+  name?: string;
+  market_cap?: number;
+  category?: string;
+}
+
+type TokenMachineInterpreter = Interpreter<TokenContext, any, TokenEvent, any, any>
 
 export class CategoryManager extends EventEmitter {
-  private machines: Map<string, TokenService> = new Map();
-  private stateCache: Map<string, State<TokenContext, any, any, any, any>> = new Map();
-  
+  private stateMachines: Map<string, TokenMachineInterpreter> = new Map();
+  private initialized: boolean = false;
+
   constructor() {
     super();
-    this.loadExistingTokens();
+    logger.info('CategoryManager initialized');
   }
-  
-  /**
-   * Load existing tokens and restore their state machines
-   */
-  private async loadExistingTokens(): Promise<void> {
-    try {
-      // Load only active tokens in batches to prevent connection exhaustion
-      const batchSize = 1000;
-      let offset = 0;
-      let totalLoaded = 0;
-    
-      // Only load recent active tokens
-      const baseQuery = db('tokens')
-        .whereIn('category', ['NEW', 'LOW', 'MEDIUM', 'HIGH', 'AIM'])
-        .where('created_at', '>', db.raw("NOW() - INTERVAL '7 days'")); // Remove orderBy from base query
-    
-      // Get total count (without orderBy)
-      const countResult = await baseQuery.clone().count('* as count').first();
-      const totalCount = typeof countResult?.count === 'number' 
-        ? countResult.count 
-        : parseInt(countResult?.count || '0');
-    
-      logger.info(`Loading ${totalCount} existing tokens into state machines`);
-    
-      // Load in batches (add orderBy only for data retrieval)
-      while (offset < totalCount) {
-        const tokens = await baseQuery
-          .clone()
-          .orderBy('created_at', 'desc')  // Add orderBy here instead
-          .limit(batchSize)
-          .offset(offset);
-      
-        // Process this batch
-        for (const token of tokens) {
-          const machine = await this.createOrRestoreStateMachine(token.address, token.category);
-        
-          if (token.category && token.category !== 'NEW') {
-            const event = this.getEventForCategory(token.category);
-            if (event) {
-              machine.send(event);
-            }
-          }
-        }
-      
-        offset += batchSize;
-        totalLoaded += tokens.length;
-      
-        logger.info(`Loaded ${totalLoaded}/${totalCount} tokens...`);
-      
-        // Give the database pool a chance to breathe
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }  
-    
-      logger.info(`✅ Loaded ${totalLoaded} tokens into state machines`);
-    } catch (error) {
-      logger.error('Error loading existing tokens:', error);
-    }
-  }
-  
-  /**
-   * Get the appropriate event for transitioning to a category
-   */
-  private getEventForCategory(category: TokenCategory): TokenEvent | null {
-    // Map categories to their market cap thresholds
-    const categoryThresholds = {
-      LOW: { min: 0, max: categoryConfig.thresholds.LOW_MAX },
-      MEDIUM: { min: categoryConfig.thresholds.LOW_MAX, max: categoryConfig.thresholds.MEDIUM_MAX },
-      HIGH: { min: categoryConfig.thresholds.MEDIUM_MAX, max: categoryConfig.thresholds.HIGH_MAX },
-      AIM: { min: categoryConfig.thresholds.AIM_MIN, max: categoryConfig.thresholds.AIM_MAX },
-      ARCHIVE: { min: categoryConfig.thresholds.AIM_MAX + 1, max: Infinity }
-    };
 
-    const threshold = categoryThresholds[category as keyof typeof categoryThresholds];
-    if (!threshold) return null;
-
-    // Return a market cap update event with a value in the middle of the range
-    const marketCap = threshold.min + (threshold.max - threshold.min) / 2;
-    return { type: 'UPDATE_MARKET_CAP', marketCap };
-  }
-  
   /**
-   * Create or restore a state machine for a token
+   * Initialize the category manager and load existing tokens
    */
-  async createOrRestoreStateMachine(
-    tokenAddress: string,
-    currentCategory?: TokenCategory,
-    context?: Partial<TokenContext>
-  ): Promise<TokenService> {
-    // Check if machine already exists
-    if (this.machines.has(tokenAddress)) {
-      return this.machines.get(tokenAddress)!;
-    }
-    
-    // Create new machine
-    const machine = createTokenStateMachine(tokenAddress);
-    const service = interpret(machine)
-      .onTransition((state) => this.handleStateTransition(tokenAddress, state))
-      .start(currentCategory || 'NEW');
-    
-    // Update context if provided
-    if (context) {
-      service.send({
-        type: 'UPDATE_MARKET_CAP',
-        marketCap: context.currentMarketCap || 0,
-      });
-    }
-    
-    this.machines.set(tokenAddress, service);
-    return service;
-  }
-  
-  /**
-   * Handle state transitions with proper transaction management
-   */
-  private async handleStateTransition(
-    tokenAddress: string,
-    state: State<TokenContext, any, any, any, any>
-  ): Promise<void> {
-    const previousState = this.stateCache.get(tokenAddress);
-    this.stateCache.set(tokenAddress, state);
-    
-    // Skip if no actual transition
-    if (previousState?.value === state.value) {
+  async initialize(): Promise<void> {
+    if (this.initialized) {
+      logger.warn('CategoryManager already initialized');
       return;
     }
-    
-    const fromCategory = previousState?.value as TokenCategory || 'NEW';
-    const toCategory = state.value as TokenCategory;
-    
-    logger.info(`State transition: ${tokenAddress} ${fromCategory} → ${toCategory}`);
-    
-    // Use a transaction to ensure all operations complete atomically
-    const trx = await db.transaction();
-    
+
     try {
-      // Update database
-      await trx('tokens')
-        .where('address', tokenAddress)
-        .update({
-          category: toCategory,
-          previous_category: fromCategory,
-          category_updated_at: new Date(),
-          category_scan_count: 0, // Reset scan count on transition
-        });
+      // Quick database fix for NEW tokens (run once)
+      await this.quickFixNewTokens();
       
-      // Record transition
-      await trx('category_transitions').insert({
-        token_address: tokenAddress,
-        from_category: fromCategory,
-        to_category: toCategory,
-        market_cap_at_transition: state.context.currentMarketCap,
-        reason: 'market_cap_change',
-        metadata: {
-          scanCount: state.context.scanCount,
-        },
-      });
+      // First run the migration for any remaining NEW tokens
+      await this.migrateNewTokens();
       
-      // Commit transaction
-      await trx.commit();
+      // Then load all active tokens
+      await this.initializeExistingTokens();
       
-      // Emit event (after transaction commits successfully)
-      this.emit('categoryChange', {
-        tokenAddress,
-        fromCategory,
-        toCategory,
-        marketCap: state.context.currentMarketCap,
-        timestamp: new Date(),
-      });
-      
-      // Special handling for AIM entry
-      if (toCategory === 'AIM') {
-        await this.handleAimEntry(tokenAddress);
-      }
-      
-      // Clean up if reached terminal state
-      if (toCategory === 'BIN' || toCategory === 'COMPLETE') {
-        this.machines.delete(tokenAddress);
-        this.stateCache.delete(tokenAddress);
-      }
+      this.initialized = true;
+      logger.info('CategoryManager initialization complete');
     } catch (error) {
-      // Rollback transaction on error
-      await trx.rollback();
-      logger.error(`Error handling state transition for ${tokenAddress}:`, error);
-      // Don't throw - we don't want to crash the state machine
-    }
-  }
-  
-  /**
-   * Update token with new market cap
-   */
-  async updateTokenMarketCap(tokenAddress: string, marketCap: number): Promise<void> {
-    let service = this.machines.get(tokenAddress);
-    
-    if (!service) {
-      // Create new machine if doesn't exist
-      service = await this.createOrRestoreStateMachine(tokenAddress);
-    }
-    
-    service.send({
-      type: 'UPDATE_MARKET_CAP',
-      marketCap,
-    });
-  }
-  
-  /**
-   * Update token category directly (for gRPC integration)
-   */
-  async updateTokenCategory(tokenAddress: string, newCategory: string, marketCap: number): Promise<void> {
-    try {
-      // Update through state machine
-      await this.updateTokenMarketCap(tokenAddress, marketCap);
-      
-      // Also update database directly for immediate consistency
-      await db('tokens')
-        .where('address', tokenAddress)
-        .update({
-          category: newCategory,
-          market_cap: marketCap,
-          updated_at: new Date()
-        });
-    } catch (error) {
-      logger.error(`Error updating token category for ${tokenAddress}:`, error);
+      logger.error('Failed to initialize CategoryManager:', error);
       throw error;
     }
   }
-  
+
   /**
-   * Record scan completion
+   * Quick fix to update NEW tokens in database
    */
-  async recordScanComplete(tokenAddress: string): Promise<void> {
-    const service = this.machines.get(tokenAddress);
-    if (service) {
-      service.send({ type: 'SCAN_COMPLETE' });
-    }
-  }
-  
-  /**
-   * Manual category override
-   */
-  async manualCategoryOverride(
-    tokenAddress: string, 
-    category: TokenCategory, 
-    reason: string
-  ): Promise<void> {
-    const service = this.machines.get(tokenAddress);
-    if (service) {
-      service.send({
-        type: 'MANUAL_OVERRIDE',
-        category,
-        reason,
-      });
-    }
-  }
-  
-  /**
-   * Handle AIM entry with separate connection
-   */
-  private async handleAimEntry(tokenAddress: string): Promise<void> {
+  private async quickFixNewTokens(): Promise<void> {
     try {
-      await db('tokens')
-        .where('address', tokenAddress)
-        .increment('aim_attempts', 1);
+      const result = await db.raw(`
+        UPDATE tokens 
+        SET category = CASE
+          WHEN market_cap < 8000 THEN 'ARCHIVE'
+          WHEN market_cap >= 8000 AND market_cap < 15000 THEN 'LOW'
+          WHEN market_cap >= 15000 AND market_cap < 25000 THEN 'MEDIUM'
+          WHEN market_cap >= 25000 AND market_cap < 35000 THEN 'HIGH'
+          WHEN market_cap >= 35000 AND market_cap < 105000 THEN 'AIM'
+          WHEN market_cap >= 105000 THEN 'GRADUATED'
+          ELSE 'LOW'
+        END,
+        updated_at = NOW()
+        WHERE category = 'NEW'
+      `);
       
-      this.emit('aimEntry', {
-        tokenAddress,
-        timestamp: new Date(),
-      });
+      if (result.rowCount > 0) {
+        logger.info(`Quick fix: Updated ${result.rowCount} NEW tokens in database`);
+      }
     } catch (error) {
-      logger.error(`Error handling AIM entry for ${tokenAddress}:`, error);
+      logger.error('Quick fix database update failed:', error);
+      // Continue anyway - runtime fix will handle it
     }
   }
-  
+
   /**
-   * Get current state of a token
+   * Initialize state machines for existing tokens
    */
-  getTokenState(tokenAddress: string): State<TokenContext, any, any, any, any> | undefined {
-    return this.stateCache.get(tokenAddress);
+  private async initializeExistingTokens(): Promise<void> {
+    try {
+      // Load all active tokens (exclude ARCHIVE)
+      const tokens: Token[] = await db('tokens')
+        .whereIn('category', ['LOW', 'MEDIUM', 'HIGH', 'AIM', 'GRADUATED'])
+        .select('address', 'category', 'market_cap');
+      
+      for (const token of tokens) {
+        this.createOrRestoreStateMachine(
+          token.address,
+          token.category,
+          token.market_cap
+        );
+      }
+      
+      logger.info(`Initialized ${tokens.length} existing token state machines`);
+    } catch (error) {
+      logger.error('Failed to initialize existing tokens:', error);
+      throw error;
+    }
   }
-  
+
   /**
-   * Get all tokens in a specific category
+   * Migrate tokens with legacy NEW category
    */
-  async getTokensByCategory(category: TokenCategory): Promise<string[]> {
-    const tokens = await db('tokens')
-      .where('category', category)
-      .select('address');
+  private async migrateNewTokens(): Promise<void> {
+    const newTokens: Token[] = await db('tokens')
+      .where('category', 'NEW')
+      .select('address', 'market_cap', 'symbol', 'name');
     
-    return tokens.map(t => t.address);
+    if (newTokens.length === 0) {
+      logger.info('No tokens with legacy NEW category found');
+      return;
+    }
+    
+    logger.info(`Found ${newTokens.length} tokens with legacy NEW category, migrating...`);
+    
+    for (const token of newTokens) {
+      const newCategory = determineCategoryFromMarketCap(token.market_cap || 0);
+      
+      await db.transaction(async (trx: any) => {
+        // Update token category
+        await trx('tokens')
+          .where('address', token.address)
+          .update({
+            category: newCategory,
+            updated_at: new Date()
+          });
+        
+        // Log transition
+        await trx('category_transitions').insert({
+          token_address: token.address,
+          from_category: 'NEW',
+          to_category: newCategory,
+          market_cap_at_transition: token.market_cap || 0,
+          reason: 'legacy_new_migration',
+          created_at: new Date()
+        });
+      });
+      
+      logger.info(`Migrated token ${token.symbol || token.address.substring(0, 8)} from NEW to ${newCategory}`);
+    }
+    
+    logger.info(`Successfully migrated ${newTokens.length} tokens from NEW category`);
   }
-  
+
   /**
-   * Get category distribution
+   * Create or restore a state machine for a token
    */
-  async getCategoryDistribution(): Promise<Record<TokenCategory, number>> {
-    const distribution = await db('tokens')
-      .select('category')
-      .count('* as count')
-      .groupBy('category');
+  private createOrRestoreStateMachine(
+    tokenAddress: string,
+    currentCategory?: string,
+    marketCap?: number
+  ): TokenMachineInterpreter {
+    // Handle legacy 'NEW' state by mapping to appropriate category
+    let initialState = currentCategory;
     
-    const result: Record<string, number> = {};
-    distribution.forEach(row => {
-      result[row.category] = Number(row.count);
+    // QUICK FIX: Handle legacy 'NEW' state
+    if (currentCategory === 'NEW') {
+      // Map NEW to appropriate category based on market cap
+      initialState = determineCategoryFromMarketCap(marketCap || 0);
+      
+      logger.warn(`Migrating token ${tokenAddress} from legacy NEW state to ${initialState} (market cap: $${marketCap || 0})`);
+      
+      // Queue database update
+      this.updateTokenCategoryInDb(tokenAddress, 'NEW', initialState, marketCap || 0, 'legacy_new_handling')
+        .catch(error => logger.error(`Failed to update token ${tokenAddress} in database:`, error));
+    }
+    
+    const machine = createTokenCategoryMachine(tokenAddress);
+    
+    // Create service (interpreter)
+    const service = interpret(machine);
+    
+    // If we have a valid initial state, start with that state
+    if (initialState && this.isValidState(initialState)) {
+      try {
+        service.start(initialState);
+      } catch (error) {
+        logger.error(`Failed to restore state for ${tokenAddress}, starting fresh:`, error);
+        service.start();
+      }
+    } else {
+      // Start with default initial state
+      service.start();
+    }
+    
+    // Store the service
+    this.stateMachines.set(tokenAddress, service);
+    
+    // Set up state change listener
+    service.onTransition((state) => {
+      if (state.changed) {
+        this.handleStateTransition(tokenAddress, state);
+      }
     });
     
-    return result as Record<TokenCategory, number>;
+    logger.debug(`Created state machine for ${tokenAddress} in ${service.state.value} state`);
+    return service;
   }
-  
+
   /**
-   * Bulk update multiple tokens with batching
+   * Validate if a state is valid
    */
-  async bulkUpdateMarketCaps(updates: Array<{ address: string; marketCap: number }>): Promise<void> {
-    // Process in batches to avoid overwhelming the system
-    const batchSize = 10;
-    for (let i = 0; i < updates.length; i += batchSize) {
-      const batch = updates.slice(i, i + batchSize);
-      await Promise.all(
-        batch.map(update => this.updateTokenMarketCap(update.address, update.marketCap))
+  private isValidState(state: string): boolean {
+    return VALID_STATES.includes(state);
+  }
+
+  /**
+   * Handle price update for a token
+   */
+  async handlePriceUpdate(tokenAddress: string, marketCap: number): Promise<void> {
+    try {
+      let machine = this.stateMachines.get(tokenAddress);
+      
+      // If machine doesn't exist, create it
+      if (!machine) {
+        logger.info(`Creating new state machine for token ${tokenAddress}`);
+        
+        // Determine initial category based on market cap
+        const initialCategory = determineCategoryFromMarketCap(marketCap);
+        
+        // Check if token exists in database
+        const existingToken: Token | undefined = await db('tokens')
+          .where('address', tokenAddress)
+          .first();
+        
+        if (existingToken) {
+          // Use existing category unless it's NEW
+          const category = existingToken.category === 'NEW' ? initialCategory : existingToken.category;
+          machine = this.createOrRestoreStateMachine(tokenAddress, category, marketCap);
+        } else {
+          // New token, create with determined category
+          machine = this.createOrRestoreStateMachine(tokenAddress, initialCategory, marketCap);
+        }
+      }
+      
+      // Send price update event
+      machine.send({
+        type: 'PRICE_UPDATE',
+        marketCap,
+        timestamp: new Date()
+      });
+      
+    } catch (error) {
+      logger.error(`Failed to handle price update for ${tokenAddress}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update token category directly (for grpc-stream-manager compatibility)
+   */
+  async updateTokenCategory(tokenAddress: string, newCategory: string, marketCap: number): Promise<void> {
+    try {
+      // Get current category
+      const currentToken = await db('tokens')
+        .where('address', tokenAddress)
+        .select('category')
+        .first();
+      
+      const currentCategory = currentToken?.category || 'UNKNOWN';
+      
+      // Update in database
+      await this.updateTokenCategoryInDb(
+        tokenAddress,
+        currentCategory,
+        newCategory,
+        marketCap,
+        'direct_update'
       );
       
-      // Small delay between batches
-      if (i + batchSize < updates.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+      // Update or create state machine
+      const machine = this.stateMachines.get(tokenAddress);
+      if (machine) {
+        // Send price update to trigger state change
+        machine.send({
+          type: 'PRICE_UPDATE',
+          marketCap,
+          timestamp: new Date()
+        });
+      } else {
+        // Create new state machine with the category
+        this.createOrRestoreStateMachine(tokenAddress, newCategory, marketCap);
+      }
+      
+      logger.info(`Updated token ${tokenAddress} category to ${newCategory}`);
+    } catch (error) {
+      logger.error(`Failed to update token category for ${tokenAddress}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Handle state transitions
+   */
+  private async handleStateTransition(tokenAddress: string, state: any): Promise<void> {
+    const previousState = state.history?.value;
+    const currentState = state.value;
+    
+    if (previousState && previousState !== currentState) {
+      const event: CategoryChangeEvent = {
+        tokenAddress,
+        fromCategory: previousState,
+        toCategory: currentState,
+        marketCap: state.context.marketCap,
+        reason: 'market_cap_change',
+        timestamp: new Date()
+      };
+      
+      // Update database
+      await this.updateTokenCategoryInDb(
+        tokenAddress,
+        previousState,
+        currentState,
+        state.context.marketCap,
+        'state_transition'
+      );
+      
+      // Emit event
+      this.emit('categoryChange', event);
+      
+      // If archived, remove state machine
+      if (currentState === 'ARCHIVE') {
+        this.stateMachines.delete(tokenAddress);
+        logger.info(`Archived and removed state machine for ${tokenAddress}`);
       }
     }
   }
-  
+
   /**
-   * Clean up completed/dead tokens
+   * Update token category in database
    */
-  async cleanup(): Promise<void> {
-    const deadTokens = await db('tokens')
-      .whereIn('category', ['BIN', 'COMPLETE'])
-      .select('address');
-    
-    for (const token of deadTokens) {
-      this.machines.delete(token.address);
-      this.stateCache.delete(token.address);
+  private async updateTokenCategoryInDb(
+    tokenAddress: string,
+    fromCategory: string,
+    toCategory: string,
+    marketCap: number,
+    reason: string
+  ): Promise<void> {
+    try {
+      await db.transaction(async (trx: any) => {
+        // Update token
+        await trx('tokens')
+          .where('address', tokenAddress)
+          .update({
+            category: toCategory,
+            market_cap: marketCap,
+            updated_at: new Date()
+          });
+        
+        // Log transition
+        await trx('category_transitions').insert({
+          token_address: tokenAddress,
+          from_category: fromCategory,
+          to_category: toCategory,
+          market_cap_at_transition: marketCap,
+          reason,
+          created_at: new Date()
+        });
+      });
+    } catch (error) {
+      logger.error(`Failed to update token category for ${tokenAddress}:`, error);
+      throw error;
     }
-    
-    logger.info(`Cleaned up ${deadTokens.length} dead/completed tokens`);
   }
-  
+
+  /**
+   * Force archive a token
+   */
+  async archiveToken(tokenAddress: string, reason: string = 'manual'): Promise<void> {
+    const machine = this.stateMachines.get(tokenAddress);
+    if (machine) {
+      machine.send({ type: 'FORCE_ARCHIVE' });
+      logger.info(`Force archived token ${tokenAddress} - Reason: ${reason}`);
+    }
+  }
+
+  /**
+   * Get current category for a token
+   */
+  getCurrentCategory(tokenAddress: string): string | null {
+    const machine = this.stateMachines.get(tokenAddress);
+    return machine ? machine.state.value as string : null;
+  }
+
+  /**
+   * Get all active tokens by category
+   */
+  getTokensByCategory(category: string): string[] {
+    const tokens: string[] = [];
+    this.stateMachines.forEach((machine, tokenAddress) => {
+      if (machine.state.value === category) {
+        tokens.push(tokenAddress);
+      }
+    });
+    return tokens;
+  }
+
   /**
    * Get statistics
    */
-  getStats() {
-    return {
-      activeMachines: this.machines.size,
-      cachedStates: this.stateCache.size,
+  getStatistics(): Record<string, number> {
+    const stats: Record<string, number> = {
+      total: this.stateMachines.size,
+      LOW: 0,
+      MEDIUM: 0,
+      HIGH: 0,
+      AIM: 0,
+      GRADUATED: 0
     };
+    
+    this.stateMachines.forEach((machine) => {
+      const state = machine.state.value as string;
+      if (stats[state] !== undefined) {
+        stats[state]++;
+      }
+    });
+    
+    return stats;
   }
-  
+
   /**
-   * Shutdown gracefully
+   * Cleanup and shutdown
    */
   async shutdown(): Promise<void> {
+    logger.info('Shutting down CategoryManager...');
+    
     // Stop all state machines
-    for (const [address, service] of Array.from(this.machines)) {
-      service.stop();
-    }
+    this.stateMachines.forEach((machine) => {
+      machine.stop();
+    });
     
-    this.machines.clear();
-    this.stateCache.clear();
+    this.stateMachines.clear();
+    this.removeAllListeners();
     
-    logger.info('CategoryManager shut down');
+    logger.info('CategoryManager shutdown complete');
   }
 }
 
