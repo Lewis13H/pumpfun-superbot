@@ -1030,6 +1030,7 @@ export class GrpcStreamManager extends EventEmitter {
     if (this.buffers.transactions.length === 0) return;
     
     try {
+      const uniqueTokens = [...new Set(this.buffers.transactions.map(tx => tx.tokenAddress))];
       logger.info(`💰 Processing ${this.buffers.transactions.length} transactions...`);
       
       // Filter out transactions with unknown token address
