@@ -1,10 +1,12 @@
+// Updated category-config.ts
+
 import { config as dotenv } from 'dotenv';
 import { logger } from '../utils/logger2';
 
 dotenv();
 
-// Category type definition
-export type TokenCategory = 'NEW' | 'LOW' | 'MEDIUM' | 'HIGH' | 'AIM' | 'ARCHIVE' | 'BIN' | 'COMPLETE';
+// Category type definition - Added GRADUATED
+export type TokenCategory = 'LOW' | 'MEDIUM' | 'HIGH' | 'AIM' | 'GRADUATED' | 'ARCHIVE' | 'BIN' | 'COMPLETE';
 
 // Scan interval configuration
 export interface ScanConfig {
@@ -32,6 +34,8 @@ export interface PositionLimits {
 // Main configuration interface
 export interface CategoryConfig {
   thresholds: {
+    MIN_MARKET_CAP: number;  // New: Minimum $8k to save
+    LOW_MIN: number;
     LOW_MAX: number;
     MEDIUM_MAX: number;
     HIGH_MAX: number;
@@ -46,24 +50,25 @@ export interface CategoryConfig {
     basicApiList: string[];
     fullApiList: string[];
   };
+  archiveSettings: {
+    belowThresholdHours: number; // Hours below $8k before archiving
+    checkIntervalMinutes: number; // How often to check for tokens to archive
+  };
 }
 
 // Load from environment with defaults
 function loadConfig(): CategoryConfig {
   return {
     thresholds: {
-      LOW_MAX: parseInt(process.env.CATEGORY_LOW_MAX || '8000'),
-      MEDIUM_MAX: parseInt(process.env.CATEGORY_MEDIUM_MAX || '19000'),
-      HIGH_MAX: parseInt(process.env.CATEGORY_HIGH_MAX || '35000'),
-      AIM_MIN: parseInt(process.env.CATEGORY_AIM_MIN || '35000'),
-      AIM_MAX: parseInt(process.env.CATEGORY_AIM_MAX || '105000'),
+      MIN_MARKET_CAP: parseInt(process.env.MIN_MARKET_CAP || '8000'),  // $8k minimum
+      LOW_MIN: parseInt(process.env.CATEGORY_LOW_MIN || '8000'),      // $8k
+      LOW_MAX: parseInt(process.env.CATEGORY_LOW_MAX || '15000'),     // $15k
+      MEDIUM_MAX: parseInt(process.env.CATEGORY_MEDIUM_MAX || '25000'), // $25k
+      HIGH_MAX: parseInt(process.env.CATEGORY_HIGH_MAX || '35000'),    // $35k
+      AIM_MIN: parseInt(process.env.CATEGORY_AIM_MIN || '35000'),      // $35k
+      AIM_MAX: parseInt(process.env.CATEGORY_AIM_MAX || '105000'),     // $105k
     },
     scanIntervals: {
-      NEW: {
-        interval: parseInt(process.env.SCAN_INTERVAL_NEW || '300'),
-        duration: parseInt(process.env.SCAN_DURATION_NEW || '1800'),
-        maxScans: parseInt(process.env.SCAN_MAX_NEW || '6'),
-      },
       LOW: {
         interval: parseInt(process.env.SCAN_INTERVAL_LOW || '1200'),
         duration: parseInt(process.env.SCAN_DURATION_LOW || '10800'),
@@ -84,6 +89,11 @@ function loadConfig(): CategoryConfig {
         duration: parseInt(process.env.SCAN_DURATION_AIM || '600'),
         maxScans: parseInt(process.env.SCAN_MAX_AIM || '60'),
       },
+      GRADUATED: {
+        interval: parseInt(process.env.SCAN_INTERVAL_GRADUATED || '3600'), // 1 hour
+        duration: parseInt(process.env.SCAN_DURATION_GRADUATED || '86400'), // 24 hours
+        maxScans: parseInt(process.env.SCAN_MAX_GRADUATED || '24'),
+      },
       ARCHIVE: {
         interval: parseInt(process.env.SCAN_INTERVAL_ARCHIVE || '43200'),
         duration: parseInt(process.env.SCAN_DURATION_ARCHIVE || '259200'),
@@ -94,7 +104,7 @@ function loadConfig(): CategoryConfig {
         duration: 0,
         maxScans: 0,
       },
-        COMPLETE: {
+      COMPLETE: {
         interval: 0,
         duration: 0,
         maxScans: 0,
@@ -139,6 +149,10 @@ function loadConfig(): CategoryConfig {
       useSnifferInAimOnly: true,
       basicApiList: ['dexscreener', 'birdeye', 'helius'],
       fullApiList: ['dexscreener', 'birdeye', 'helius', 'solsniffer', 'moralis'],
+    },
+    archiveSettings: {
+      belowThresholdHours: parseInt(process.env.ARCHIVE_BELOW_THRESHOLD_HOURS || '48'),
+      checkIntervalMinutes: parseInt(process.env.ARCHIVE_CHECK_INTERVAL_MINUTES || '60'),
     },
   };
 }
@@ -187,44 +201,103 @@ export function validateConfig(config: CategoryConfig): boolean {
   return true;
 }
 
-// Hot reload capability
-export class ConfigManager {
-  private static instance: CategoryConfig = loadConfig();
-  private static watchers: Array<(config: CategoryConfig) => void> = [];
+// Updated category utilities
+export function getCategoryFromMarketCap(marketCap: number): TokenCategory | null {
+  if (marketCap < categoryConfig.thresholds.MIN_MARKET_CAP) return null; // Below $8k
   
-  static getConfig(): CategoryConfig {
-    return this.instance;
-  }
+  const { thresholds } = categoryConfig;
   
-  static reload(): boolean {
-    const newConfig = loadConfig();
-    if (validateConfig(newConfig)) {
-      this.instance = newConfig;
-      this.notifyWatchers();
-      logger.info('Configuration reloaded successfully');
-      return true;
-    }
-    return false;
-  }
+  if (marketCap < thresholds.LOW_MAX) return 'LOW';
+  if (marketCap < thresholds.MEDIUM_MAX) return 'MEDIUM';
+  if (marketCap < thresholds.HIGH_MAX) return 'HIGH';
+  if (marketCap <= thresholds.AIM_MAX) return 'AIM';
   
-  static watch(callback: (config: CategoryConfig) => void): void {
-    this.watchers.push(callback);
-  }
+  return 'GRADUATED';
+}
+
+// Get display name for category
+export function getCategoryDisplayName(category: TokenCategory): string {
+  const names: Record<TokenCategory, string> = {
+    LOW: 'Low Priority ($8k-$15k)',
+    MEDIUM: 'Medium Priority ($15k-$25k)',
+    HIGH: 'High Priority ($25k-$35k)',
+    AIM: 'Buy Zone ($35k-$105k)',
+    GRADUATED: 'Graduated (>$105k)',
+    ARCHIVE: 'Archived',
+    BIN: 'Dead',
+    COMPLETE: 'Completed',
+  };
+  return names[category] || category;
+}
+
+// Get category color for UI
+export function getCategoryColor(category: TokenCategory): string {
+  const colors: Record<TokenCategory, string> = {
+    LOW: '#60A5FA',      // Light Blue
+    MEDIUM: '#FBBF24',   // Yellow
+    HIGH: '#FB923C',     // Orange
+    AIM: '#34D399',      // Green
+    GRADUATED: '#8B5CF6', // Purple
+    ARCHIVE: '#6B7280',  // Dark Gray
+    BIN: '#374151',      // Darker Gray
+    COMPLETE: '#10B981', // Emerald
+  };
+  return colors[category] || '#9CA3AF';
+}
+
+// Check if category allows trading
+export function canTrade(category: TokenCategory): boolean {
+  return category === 'AIM';
+}
+
+// Check if category is terminal
+export function isTerminalCategory(category: TokenCategory): boolean {
+  return category === 'BIN' || category === 'COMPLETE';
+}
+
+// Get valid transitions from a category
+export function getValidTransitions(
+  fromCategory: TokenCategory,
+  currentMarketCap: number
+): TokenCategory[] {
+  // Market cap determines most transitions
+  const marketCapCategory = getCategoryFromMarketCap(currentMarketCap);
   
-  private static notifyWatchers(): void {
-    this.watchers.forEach(callback => callback(this.instance));
+  switch (fromCategory) {
+    case 'LOW':
+      return ['MEDIUM', 'HIGH', 'AIM', 'GRADUATED', 'ARCHIVE'];
+    
+    case 'MEDIUM':
+      return ['LOW', 'HIGH', 'AIM', 'GRADUATED', 'ARCHIVE'];
+    
+    case 'HIGH':
+      return ['MEDIUM', 'LOW', 'AIM', 'GRADUATED', 'ARCHIVE'];
+    
+    case 'AIM':
+      return ['HIGH', 'MEDIUM', 'LOW', 'GRADUATED', 'ARCHIVE'];
+    
+    case 'GRADUATED':
+      return ['AIM', 'HIGH', 'MEDIUM', 'LOW', 'ARCHIVE'];
+    
+    case 'ARCHIVE':
+      return ['LOW', 'MEDIUM', 'HIGH', 'AIM', 'GRADUATED', 'BIN'];
+    
+    case 'BIN':
+      return []; // Terminal state
+    
+    case 'COMPLETE':
+      return []; // Terminal state
+    
+    default:
+      return [];
   }
 }
 
 // Log configuration on load
 if (validateConfig(categoryConfig)) {
   logger.info('Category configuration loaded successfully');
+  logger.info(`Minimum market cap threshold: $${categoryConfig.thresholds.MIN_MARKET_CAP}`);
+  logger.info(`Archive after ${categoryConfig.archiveSettings.belowThresholdHours} hours below threshold`);
 } else {
   logger.error('Invalid category configuration - using defaults');
 }
-
-
-
-
-
-

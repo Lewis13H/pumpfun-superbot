@@ -1,3 +1,5 @@
+// Updated state-machines.ts to handle new categories and thresholds
+
 import { createMachine, assign, StateMachine } from 'xstate';
 import { TokenCategory, categoryConfig } from '../config/category-config';
 import { logger } from '../utils/logger2';
@@ -13,7 +15,7 @@ export interface TokenContext {
 }
 
 // Events that can trigger transitions
-export type TokenEvent = 
+export type TokenEvent =
   | { type: 'UPDATE_MARKET_CAP'; marketCap: number }
   | { type: 'SCAN_COMPLETE' }
   | { type: 'TIMEOUT' }
@@ -27,7 +29,7 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
   
   return createMachine<TokenContext, TokenEvent>({
     id: `token-${tokenAddress}`,
-    initial: 'NEW',
+    initial: 'LOW', // No more NEW state - tokens start at LOW if they're >= $8k
     context: {
       tokenAddress,
       currentMarketCap: 0,
@@ -36,59 +38,6 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
     },
     
     states: {
-      NEW: {
-        entry: 'logCategoryEntry',
-        exit: 'logCategoryExit',
-        
-        after: {
-          [scanIntervals.NEW.duration * 1000]: {
-            target: 'ARCHIVE',
-            actions: 'logTimeout',
-          },
-        },
-        
-        on: {
-          UPDATE_MARKET_CAP: [
-            {
-              target: 'ARCHIVE',
-              cond: 'isZeroMarketCap',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'LOW',
-              cond: 'canTransitionFromNewToLow',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'MEDIUM',
-              cond: 'canTransitionFromNewToMedium',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'HIGH',
-              cond: 'canTransitionFromNewToHigh',
-              actions: 'updateMarketCap',
-            },
-            {
-              target: 'AIM',
-              cond: 'canTransitionFromNewToAim',
-              actions: 'updateMarketCap',
-            },
-            {
-              actions: 'updateMarketCap',
-            },
-          ],
-          
-          SCAN_COMPLETE: {
-            actions: 'incrementScanCount',
-          },
-          
-          FORCE_ARCHIVE: {
-            target: 'ARCHIVE',
-          },
-        },
-      },
-      
       LOW: {
         entry: 'logCategoryEntry',
         exit: 'logCategoryExit',
@@ -103,6 +52,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
         on: {
           UPDATE_MARKET_CAP: [
             {
+              target: 'ARCHIVE',
+              cond: 'isBelowMinimum',
+              actions: 'updateMarketCap',
+            },
+            {
               target: 'MEDIUM',
               cond: 'isMediumMarketCap',
               actions: 'updateMarketCap',
@@ -115,6 +69,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
             {
               target: 'AIM',
               cond: 'isAimMarketCap',
+              actions: 'updateMarketCap',
+            },
+            {
+              target: 'GRADUATED',
+              cond: 'isGraduatedMarketCap',
               actions: 'updateMarketCap',
             },
             {
@@ -153,6 +112,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
         on: {
           UPDATE_MARKET_CAP: [
             {
+              target: 'ARCHIVE',
+              cond: 'isBelowMinimum',
+              actions: 'updateMarketCap',
+            },
+            {
               target: 'LOW',
               cond: 'isLowMarketCap',
               actions: 'updateMarketCap',
@@ -165,6 +129,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
             {
               target: 'AIM',
               cond: 'isAimMarketCap',
+              actions: 'updateMarketCap',
+            },
+            {
+              target: 'GRADUATED',
+              cond: 'isGraduatedMarketCap',
               actions: 'updateMarketCap',
             },
             {
@@ -199,6 +168,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
         on: {
           UPDATE_MARKET_CAP: [
             {
+              target: 'ARCHIVE',
+              cond: 'isBelowMinimum',
+              actions: 'updateMarketCap',
+            },
+            {
               target: 'MEDIUM',
               cond: 'isMediumMarketCap',
               actions: 'updateMarketCap',
@@ -211,6 +185,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
             {
               target: 'AIM',
               cond: 'isAimMarketCap',
+              actions: 'updateMarketCap',
+            },
+            {
+              target: 'GRADUATED',
+              cond: 'isGraduatedMarketCap',
               actions: 'updateMarketCap',
             },
             {
@@ -246,6 +225,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
         on: {
           UPDATE_MARKET_CAP: [
             {
+              target: 'GRADUATED',
+              cond: 'isGraduatedMarketCap',
+              actions: 'updateMarketCap',
+            },
+            {
               target: 'HIGH',
               cond: 'isHighMarketCap',
               actions: 'updateMarketCap',
@@ -261,6 +245,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
               actions: 'updateMarketCap',
             },
             {
+              target: 'ARCHIVE',
+              cond: 'isBelowMinimum',
+              actions: 'updateMarketCap',
+            },
+            {
               actions: 'updateMarketCap',
             },
           ],
@@ -273,6 +262,62 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
           SCAN_COMPLETE: [
             {
               target: 'HIGH',
+              cond: 'exceededMaxScans',
+              actions: 'incrementScanCount',
+            },
+            {
+              actions: 'incrementScanCount',
+            },
+          ],
+        },
+      },
+      
+      GRADUATED: {
+        entry: ['logCategoryEntry', 'notifyGraduation'],
+        exit: 'logCategoryExit',
+        
+        after: {
+          [scanIntervals.GRADUATED.duration * 1000]: {
+            target: 'ARCHIVE',
+            actions: 'logTimeout',
+          },
+        },
+        
+        on: {
+          UPDATE_MARKET_CAP: [
+            {
+              target: 'AIM',
+              cond: 'isAimMarketCap',
+              actions: 'updateMarketCap',
+            },
+            {
+              target: 'HIGH',
+              cond: 'isHighMarketCap',
+              actions: 'updateMarketCap',
+            },
+            {
+              target: 'MEDIUM',
+              cond: 'isMediumMarketCap',
+              actions: 'updateMarketCap',
+            },
+            {
+              target: 'LOW',
+              cond: 'isLowMarketCap',
+              actions: 'updateMarketCap',
+            },
+            {
+              target: 'ARCHIVE',
+              cond: 'isBelowMinimum',
+              actions: 'updateMarketCap',
+            },
+            {
+              actions: 'updateMarketCap',
+            },
+          ],
+          
+          SCAN_COMPLETE: [
+            {
+              target: 'ARCHIVE',
               cond: 'exceededMaxScans',
               actions: 'incrementScanCount',
             },
@@ -330,98 +375,44 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
     },
   }, {
     guards: {
-      isZeroMarketCap: (context, event) => {
+      isBelowMinimum: (context, event) => {
         if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap <= 0;
+        return event.marketCap < thresholds.MIN_MARKET_CAP;
       },
       
-      // NEW state transitions with duration check
-      canTransitionFromNewToLow: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        const minimumDuration = 1800; // 30 minutes in seconds
-        const timeInNew = (Date.now() - context.categoryStartTime) / 1000;
-        const hasMinDuration = timeInNew >= minimumDuration;
-        const isLowCap = event.marketCap > 0 && event.marketCap < thresholds.LOW_MAX;
-        
-        if (!hasMinDuration) {
-          logger.debug(`Token ${context.tokenAddress} has only been in NEW for ${Math.round(timeInNew/60)} minutes, needs ${minimumDuration/60} minutes`);
-        }
-        
-        return isLowCap && hasMinDuration;
-      },
-      
-      canTransitionFromNewToMedium: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        const minimumDuration = 1800;
-        const timeInNew = (Date.now() - context.categoryStartTime) / 1000;
-        const hasMinDuration = timeInNew >= minimumDuration;
-        const isMediumCap = event.marketCap >= thresholds.LOW_MAX && 
-                            event.marketCap < thresholds.MEDIUM_MAX;
-        
-        if (!hasMinDuration) {
-          logger.debug(`Token ${context.tokenAddress} has only been in NEW for ${Math.round(timeInNew/60)} minutes, needs ${minimumDuration/60} minutes`);
-        }
-        
-        return isMediumCap && hasMinDuration;
-      },
-      
-      canTransitionFromNewToHigh: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        const minimumDuration = 1800;
-        const timeInNew = (Date.now() - context.categoryStartTime) / 1000;
-        const hasMinDuration = timeInNew >= minimumDuration;
-        const isHighCap = event.marketCap >= thresholds.MEDIUM_MAX && 
-                          event.marketCap < thresholds.HIGH_MAX;
-        
-        if (!hasMinDuration) {
-          logger.debug(`Token ${context.tokenAddress} has only been in NEW for ${Math.round(timeInNew/60)} minutes, needs ${minimumDuration/60} minutes`);
-        }
-        
-        return isHighCap && hasMinDuration;
-      },
-      
-      canTransitionFromNewToAim: (context, event) => {
-        if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        const minimumDuration = 1800;
-        const timeInNew = (Date.now() - context.categoryStartTime) / 1000;
-        const hasMinDuration = timeInNew >= minimumDuration;
-        const isAimCap = event.marketCap >= thresholds.AIM_MIN && 
-                         event.marketCap <= thresholds.AIM_MAX;
-        
-        if (!hasMinDuration) {
-          logger.debug(`Token ${context.tokenAddress} has only been in NEW for ${Math.round(timeInNew/60)} minutes, needs ${minimumDuration/60} minutes`);
-        }
-        
-        return isAimCap && hasMinDuration;
-      },
-      
-      // Regular guards for other states (no duration check needed)
       isLowMarketCap: (context, event) => {
         if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap > 0 && event.marketCap < thresholds.LOW_MAX;
+        return event.marketCap >= thresholds.LOW_MIN && 
+               event.marketCap < thresholds.LOW_MAX;
       },
       
       isMediumMarketCap: (context, event) => {
         if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap >= thresholds.LOW_MAX && 
+        return event.marketCap >= thresholds.LOW_MAX &&
                event.marketCap < thresholds.MEDIUM_MAX;
       },
       
       isHighMarketCap: (context, event) => {
         if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap >= thresholds.MEDIUM_MAX && 
+        return event.marketCap >= thresholds.MEDIUM_MAX &&
                event.marketCap < thresholds.HIGH_MAX;
       },
       
       isAimMarketCap: (context, event) => {
         if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap >= thresholds.AIM_MIN && 
+        return event.marketCap >= thresholds.AIM_MIN &&
                event.marketCap <= thresholds.AIM_MAX;
+      },
+      
+      isGraduatedMarketCap: (context, event) => {
+        if (event.type !== 'UPDATE_MARKET_CAP') return false;
+        return event.marketCap > thresholds.AIM_MAX;
       },
       
       isRecovering: (context, event) => {
         if (event.type !== 'UPDATE_MARKET_CAP') return false;
-        return event.marketCap >= thresholds.LOW_MAX;
+        // Token needs to recover to at least LOW threshold to exit ARCHIVE
+        return event.marketCap >= thresholds.LOW_MIN;
       },
       
       exceededMaxScans: (context) => {
@@ -434,7 +425,7 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
     
     actions: {
       updateMarketCap: assign({
-        currentMarketCap: (_, event) => 
+        currentMarketCap: (_, event) =>
           event.type === 'UPDATE_MARKET_CAP' ? event.marketCap : 0,
         lastScanTime: () => Date.now(),
       }),
@@ -445,7 +436,7 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
       }),
       
       logCategoryEntry: assign({
-        categoryStartTime: () => Date.now(),  // Reset timer when entering new category
+        categoryStartTime: () => Date.now(), // Reset timer when entering new category
       }),
       
       logCategoryExit: (context, event, { state }) => {
@@ -457,7 +448,11 @@ export function createTokenStateMachine(tokenAddress: string): StateMachine<Toke
       },
       
       notifyAimEntry: (context) => {
-        logger.info(`🎯 Token ${context.tokenAddress} entered AIM zone!`);
+        logger.info(`🎯 Token ${context.tokenAddress} entered AIM zone! ($35k-$105k)`);
+      },
+      
+      notifyGraduation: (context) => {
+        logger.info(`🎓 Token ${context.tokenAddress} GRADUATED! (>$105k)`);
       },
       
       logBuyExecution: (context) => {

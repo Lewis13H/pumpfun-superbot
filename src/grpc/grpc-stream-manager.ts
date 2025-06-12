@@ -376,32 +376,43 @@ export class GrpcStreamManager extends EventEmitter {
         return;
       }
       
-      // Check if token exists in database
+      // Determine category - returns null if below $8k
+      const category = this.determineCategory(price.marketCap);
+
+      // Don't process tokens below $8k market cap
+      if (category === null) {
+        logger.debug(`Ignoring token ${price.tokenAddress.substring(0, 8)}... with market cap $${price.marketCap.toFixed(0)} (below $8k threshold)`);
+        return;
+      }
+    
+       // Check if token exists in database
       const tokenExists = await this.db('tokens')
         .where('address', price.tokenAddress)
         .first();
-      
+    
       if (!tokenExists) {
-        // Create token if it doesn't exist with placeholder
+        // Create token with determined category
         await this.db('tokens')
           .insert({
             address: price.tokenAddress,
             symbol: 'LOADING...',
             name: 'Loading...',
-            category: 'NEW',
+            category: category, // Use determined category, not 'NEW'
             current_price_usd: price.priceUsd,
             current_price_sol: price.priceSol,
             market_cap: price.marketCap,
             liquidity: price.liquidityUsd / this.solPriceUsd,
             curve_progress: price.curveProgress || 0,
             last_price_update: new Date(),
-            created_at: new Date()
+            created_at: new Date(),
+            first_seen_above_8k: new Date() // Track when first seen above $8k
           })
           .onConflict('address')
           .merge(['current_price_usd', 'current_price_sol', 'market_cap', 'liquidity', 'curve_progress', 'last_price_update']);
         
         // Queue for metadata fetch
         HELIUS_METADATA_SERVICE.queueTokenForMetadata(price.tokenAddress);
+      
       } else {
         // Update existing token
         await this.db('tokens')
@@ -414,7 +425,19 @@ export class GrpcStreamManager extends EventEmitter {
             curve_progress: price.curveProgress || 0,
             last_price_update: new Date(),
             price_update_count: this.db.raw('price_update_count + 1'),
-            updated_at: new Date()
+            updated_at: new Date(),
+            // Update first_seen_above_8k if this is the first time above $8k
+            ...(tokenExists.market_cap < 8000 && price.marketCap >= 8000 && !tokenExists.first_seen_above_8k 
+              ? { first_seen_above_8k: new Date() } 
+             : {}),
+            // Clear below_8k_since if token is back above $8k
+            ...(price.marketCap >= 8000 && tokenExists.below_8k_since 
+              ? { below_8k_since: null } 
+              : {}),
+            // Set below_8k_since if token drops below $8k
+            ...(price.marketCap < 8000 && !tokenExists.below_8k_since 
+              ? { below_8k_since: new Date() } 
+              : {})
           });
       }
       
@@ -432,9 +455,9 @@ export class GrpcStreamManager extends EventEmitter {
       await this.handleLiquidityAnalytics(price, tokenExists);
       
       // Check category transitions
-      if (tokenExists) {
+      if (tokenExists && category !== null) {
         const previousCategory = tokenExists.category;
-        const newCategory = this.determineCategory(price.marketCap);
+        const newCategory = category;
         
         if (previousCategory && previousCategory !== newCategory) {
           await this.categoryManager.updateTokenCategory(price.tokenAddress, newCategory, price.marketCap);
@@ -593,13 +616,15 @@ export class GrpcStreamManager extends EventEmitter {
     }
   }
   
-  private determineCategory(marketCap: number): string {
-    if (marketCap < 5000) return 'NEW';
-    if (marketCap < 15000) return 'LOW';
-    if (marketCap < 35000) return 'MEDIUM';
-    if (marketCap < 105000) return 'HIGH';
-    if (marketCap < 500000) return 'AIM';
-    return 'ARCHIVE';
+  private determineCategory(marketCap: number): string | null {
+    // Don't save tokens below $8k
+    if (marketCap < 8000) return null;
+  
+    if (marketCap < 15000) return 'LOW';       // $8k - $15k (entry level)
+    if (marketCap < 25000) return 'MEDIUM';    // $15k - $25k
+    if (marketCap < 35000) return 'HIGH';      // $25k - $35k
+    if (marketCap < 105000) return 'AIM';      // $35k - $105k (target for trading)
+    return 'GRADUATED';                         // >$105k (graduated) - recorded but no trading
   }
   
   /**

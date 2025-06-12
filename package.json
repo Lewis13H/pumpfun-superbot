@@ -1,7 +1,7 @@
 {
-  "name": "memecoin-discover-scanner-assessor-bot",
+  "name": "pumpfun-superbot",
   "version": "1.0.0",
-  "description": "Solana token discovery and analysis system",
+  "description": "Pumpfun Superbot - Real-time Solana token monitoring and trading system",
   "main": "dist/index.js",
   "scripts": {
     "dashboard:v428": "ts-node src/dashboard/v428-dashboard-start.ts",

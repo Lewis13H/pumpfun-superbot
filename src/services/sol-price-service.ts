@@ -21,10 +21,10 @@ export interface PriceResult {
 }
 
 export class SolPriceService extends EventEmitter {
-  private currentPrice: number = 100; // Fallback price
+  private currentPrice: number = 150; // Fallback price
   private lastUpdate: Date = new Date();
   private updateInterval: NodeJS.Timeout | null = null;
-  private readonly UPDATE_FREQUENCY = 30000; // 30 seconds (improved from 60)
+  private readonly UPDATE_FREQUENCY = 10000; // 10 seconds (improved from 60)
   private isInitialized: boolean = false;
   private consecutiveFailures: number = 0;
   private readonly MAX_FAILURES = 5;
