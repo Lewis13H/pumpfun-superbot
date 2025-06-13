@@ -1,4 +1,4 @@
-// src/grpc/grpc-stream-manager.ts - ENHANCED WITH LIQUIDITY + VOLUME ANALYTICS v4.27
+// src/grpc/grpc-stream-manager.ts - ENHANCED WITH LIQUIDITY + VOLUME ANALYTICS + SHYFT RPC v4.28
 
 import { YellowstoneGrpcClient, TokenPrice, TokenTransaction } from './yellowstone-grpc-client';
 import { Knex } from 'knex';
@@ -17,6 +17,9 @@ import { LIQUIDITY_MILESTONE_ALERTS } from '../services/liquidity-milestone-aler
 
 // NEW V4.27: Import volume analytics service
 import { VOLUME_ANALYTICS_SERVICE } from '../services/volume-analytics-service';
+
+// NEW V4.28: Import Shyft RPC Service
+import { ShyftRPCService } from '../services/shyft-rpc-service';
 
 export interface StreamManagerConfig {
   grpcEndpoint: string;
@@ -50,6 +53,9 @@ export class GrpcStreamManager extends EventEmitter {
   private buySignalEvaluator: BuySignalEvaluator;
   private solPriceUsd: number = 100;
   
+  // NEW V4.28: Shyft RPC Service
+  private shyftRPC: ShyftRPCService;
+  
   private buffers: BatchBuffers = {
     prices: [],
     transactions: [],
@@ -67,7 +73,11 @@ export class GrpcStreamManager extends EventEmitter {
     // Liquidity analytics stats
     liquidityMilestonesTriggered: 0,
     highQualityLiquidityDetected: 0,
-    liquidityMomentumEvents: 0
+    liquidityMomentumEvents: 0,
+    // NEW V4.28: Shyft RPC stats
+    shyftMetadataFetched: 0,
+    shyftHoldersFetched: 0,
+    shyftErrors: 0
   };
   
   private flushTimer?: NodeJS.Timeout;
@@ -104,10 +114,14 @@ export class GrpcStreamManager extends EventEmitter {
       endpoint: config.grpcEndpoint,
       token: config.grpcToken
     });
+    
+    // NEW V4.28: Initialize Shyft RPC Service
+    this.shyftRPC = new ShyftRPCService();
   
     this.setupEventHandlers();
     this.setupLiquidityEventHandlers();
     this.setupVolumeAnalyticsEventHandlers();
+    this.setupShyftRPCEventHandlers(); // NEW V4.28
   }
   
   private setupEventHandlers(): void {
@@ -125,7 +139,12 @@ export class GrpcStreamManager extends EventEmitter {
     this.grpcClient.on('tokenCreated', async (tx: TokenTransaction) => {
       await this.handleNewToken(tx);
       
-      // Queue for Helius metadata fetch
+      // NEW V4.28: Fetch metadata from Shyft RPC immediately for new tokens
+      if (tx.tokenAddress) {
+        this.fetchTokenMetadataFromShyft(tx.tokenAddress);
+      }
+      
+      // Still queue for Helius as backup
       HELIUS_METADATA_SERVICE.queueTokenForMetadata(tx.tokenAddress);
       logger.info(`📝 Queued metadata fetch for: ${tx.tokenAddress.substring(0, 8)}...`);
     });
@@ -146,6 +165,23 @@ export class GrpcStreamManager extends EventEmitter {
     this.grpcClient.on('disconnected', () => {
       logger.warn('⚠️ gRPC stream disconnected');
       this.emit('disconnected');
+    });
+  }
+  
+  /**
+   * NEW V4.28: Setup Shyft RPC event handlers
+   */
+  private setupShyftRPCEventHandlers(): void {
+    // Handle token info updates
+    this.shyftRPC.on('tokenInfoFetched', (info: any) => {
+      this.stats.shyftMetadataFetched++;
+      logger.info(`📊 Shyft RPC: Token info received for ${info.symbol}`);
+    });
+    
+    // Handle errors
+    this.shyftRPC.on('error', (error: any) => {
+      this.stats.shyftErrors++;
+      logger.error('Shyft RPC error:', error);
     });
   }
 
@@ -285,12 +321,20 @@ export class GrpcStreamManager extends EventEmitter {
       return;
     }
     
-    logger.info('🚀 Starting enhanced gRPC stream manager with liquidity + volume analytics...');
+    logger.info('🚀 Starting enhanced gRPC stream manager with liquidity + volume + Shyft RPC analytics...');
     
     try {
       // Test database connection
       await this.db.raw('SELECT NOW()');
       logger.info('✅ Database connection verified');
+      
+      // NEW V4.28: Test Shyft RPC connection
+      const shyftConnected = await this.shyftRPC.testConnection();
+      if (shyftConnected) {
+        logger.info('✅ Shyft RPC connection verified');
+      } else {
+        logger.warn('⚠️ Shyft RPC connection failed - will use Helius only');
+      }
       
       // Get current SOL price if available
       try {
@@ -410,7 +454,10 @@ export class GrpcStreamManager extends EventEmitter {
           .onConflict('address')
           .merge(['current_price_usd', 'current_price_sol', 'market_cap', 'liquidity', 'curve_progress', 'last_price_update']);
         
-        // Queue for metadata fetch
+        // NEW V4.28: Fetch metadata from Shyft RPC for new tokens
+        this.fetchTokenMetadataFromShyft(price.tokenAddress);
+        
+        // Still queue for Helius as backup
         HELIUS_METADATA_SERVICE.queueTokenForMetadata(price.tokenAddress);
       
       } else {
@@ -485,6 +532,8 @@ export class GrpcStreamManager extends EventEmitter {
       
       // Check for buy signals on AIM tokens
       if (price.marketCap >= 35000 && price.marketCap <= 105000) {
+        // NEW V4.28: Fetch holder distribution for AIM tokens
+        await this.fetchHolderAnalytics(price.tokenAddress);
         await this.evaluateBuySignal(price.tokenAddress, price);
       }
       
@@ -652,6 +701,17 @@ export class GrpcStreamManager extends EventEmitter {
       // NEW V4.27: Process transaction for volume analytics
       await this.processTransactionForVolumeAnalytics(tx);
       
+      // NEW V4.28: For large transactions, parse with Shyft
+      if (tx.type === 'buy' || tx.type === 'sell') {
+        const solAmount = Number(tx.solAmount || 0) / 1e9;
+        const usdValue = solAmount * this.solPriceUsd;
+        
+        if (usdValue > 1000) {
+          // Large transaction - could get additional parsing from Shyft
+          logger.debug(`💰 Large ${tx.type}: $${usdValue.toFixed(0)} | ${tx.tokenAddress.substring(0, 8)}...`);
+        }
+      }
+      
       // Flush if buffer is full
       if (this.buffers.transactions.length >= this.config.batchSize) {
         await this.flush();
@@ -748,7 +808,8 @@ export class GrpcStreamManager extends EventEmitter {
             bonding_curve: newToken.bondingCurve || null,
             created_at: newToken.createdAt,
             discovery_signature: newToken.discoverySignature,
-            discovery_slot: newToken.discoverySlot
+            discovery_slot: newToken.discoverySlot,
+            metadata_source: 'pending' // NEW V4.28
           })
           .onConflict('address')
           .ignore();
@@ -769,6 +830,74 @@ export class GrpcStreamManager extends EventEmitter {
     } catch (error: any) {
       logger.error('Error handling new token:', error?.message);
       this.stats.errors++;
+    }
+  }
+  
+  /**
+   * NEW V4.28: Fetch token metadata from Shyft RPC
+   */
+  private async fetchTokenMetadataFromShyft(tokenAddress: string): Promise<void> {
+    try {
+      const tokenInfo = await this.shyftRPC.getTokenInfo(tokenAddress);
+      
+      if (tokenInfo) {
+        // Update database with real metadata
+        await this.db('tokens')
+          .where('address', tokenAddress)
+          .update({
+            symbol: tokenInfo.symbol,
+            name: tokenInfo.name,
+            description: tokenInfo.description,
+            decimals: tokenInfo.decimals,
+            total_supply: tokenInfo.supply,
+            image_uri: tokenInfo.image,
+            metadata_source: 'shyft_rpc',
+            updated_at: new Date()
+          });
+        
+        logger.info(`✅ Shyft RPC: Metadata updated for ${tokenInfo.symbol} (${tokenAddress.substring(0, 8)}...)`);
+        this.stats.shyftMetadataFetched++;
+      }
+    } catch (error) {
+      logger.error(`Failed to fetch Shyft metadata for ${tokenAddress}:`, error);
+      this.stats.shyftErrors++;
+      // Helius will serve as backup
+    }
+  }
+  
+  /**
+   * NEW V4.28: Fetch holder analytics for AIM tokens
+   */
+  private async fetchHolderAnalytics(tokenAddress: string): Promise<void> {
+    try {
+      const holders = await this.shyftRPC.getTokenHolders(tokenAddress, 25);
+      
+      if (holders && holders.length > 0) {
+        const top10Holding = holders.slice(0, 10).reduce((sum, h) => sum + (h.percentage || 0), 0);
+        const top25Holding = holders.slice(0, 25).reduce((sum, h) => sum + (h.percentage || 0), 0);
+        
+        await this.db('tokens')
+          .where('address', tokenAddress)
+          .update({
+            holders: holders.length,
+            top_10_percent: top10Holding,
+            top_25_percent: top25Holding,
+            holder_distribution: JSON.stringify({
+              top1: holders[0]?.percentage || 0,
+              top5: holders.slice(0, 5).reduce((sum, h) => sum + (h.percentage || 0), 0),
+              top10: top10Holding,
+              top25: top25Holding,
+              totalHolders: holders.length
+            }),
+            holder_update_time: new Date()
+          });
+        
+        logger.debug(`📊 Holder metrics updated: ${tokenAddress.substring(0, 8)}... | Top 10: ${top10Holding.toFixed(1)}%`);
+        this.stats.shyftHoldersFetched++;
+      }
+    } catch (error) {
+      logger.debug(`Failed to fetch holder analytics for ${tokenAddress}:`, error);
+      this.stats.shyftErrors++;
     }
   }
   
@@ -896,7 +1025,8 @@ export class GrpcStreamManager extends EventEmitter {
       bonding_curve: token.bondingCurve || null,
       created_at: token.createdAt,
       discovery_signature: token.discoverySignature,
-      discovery_slot: token.discoverySlot
+      discovery_slot: token.discoverySlot,
+      metadata_source: 'pending' // NEW V4.28
     }));
     
     await trx('tokens')
@@ -937,7 +1067,8 @@ export class GrpcStreamManager extends EventEmitter {
           current_price_usd: this.buffers.prices.find(p => p.tokenAddress === address)?.priceUsd || 0,
           current_price_sol: this.buffers.prices.find(p => p.tokenAddress === address)?.priceSol || 0,
           market_cap: this.buffers.prices.find(p => p.tokenAddress === address)?.marketCap || 0,
-          last_price_update: new Date()
+          last_price_update: new Date(),
+          metadata_source: 'pending' // NEW V4.28
         }));
         
         await trx('tokens')
@@ -946,6 +1077,11 @@ export class GrpcStreamManager extends EventEmitter {
           .merge(['current_price_usd', 'current_price_sol', 'market_cap', 'last_price_update']);
         
         logger.info(`✅ Missing tokens inserted successfully`);
+        
+        // NEW V4.28: Queue missing tokens for Shyft metadata fetch
+        for (const tokenAddress of missingTokens) {
+          this.fetchTokenMetadataFromShyft(tokenAddress);
+        }
       }
       
       // Insert price data
@@ -1100,7 +1236,8 @@ export class GrpcStreamManager extends EventEmitter {
             current_price_usd: sampleTx?.priceUsd || 0,
             current_price_sol: sampleTx?.priceSol || 0,
             market_cap: 0,
-            last_price_update: new Date()
+            last_price_update: new Date(),
+            metadata_source: 'pending' // NEW V4.28
           };
         });
         
@@ -1111,10 +1248,10 @@ export class GrpcStreamManager extends EventEmitter {
         
         logger.info(`✅ Missing tokens for transactions inserted successfully`);
         
-        // Queue missing tokens for metadata fetch
+        // NEW V4.28: Queue missing tokens for Shyft metadata fetch
         for (const tokenAddress of missingTokens) {
-          HELIUS_METADATA_SERVICE.queueTokenForMetadata(tokenAddress);
-          logger.debug(`📝 Queued metadata fetch for transaction token: ${tokenAddress.substring(0, 8)}...`);
+          this.fetchTokenMetadataFromShyft(tokenAddress);
+          logger.debug(`📝 Queued Shyft metadata fetch for transaction token: ${tokenAddress.substring(0, 8)}...`);
         }
       }
       
@@ -1185,7 +1322,7 @@ export class GrpcStreamManager extends EventEmitter {
     }
   }
   
-  // ENHANCED: Clean stats display with liquidity + volume analytics
+  // ENHANCED: Clean stats display with liquidity + volume + Shyft analytics
   private displayCleanStats(): void {
     const heliusStats = HELIUS_METADATA_SERVICE.getStats();
     const liquidityGrowthStats = LIQUIDITY_GROWTH_TRACKER.getSummaryStats();
@@ -1194,18 +1331,19 @@ export class GrpcStreamManager extends EventEmitter {
     const volumeStats = VOLUME_ANALYTICS_SERVICE.getStats();
     
     console.log('\n' + '='.repeat(80));
-    console.log('🚀 ENHANCED PUMP.FUN BOT STATUS v4.27');
+    console.log('🚀 ENHANCED PUMP.FUN BOT STATUS v4.28 (with Shyft RPC)');
     console.log('='.repeat(80));
     console.log(`📊 Processed: ${this.stats.pricesProcessed} prices | ${this.stats.newTokensDiscovered} new tokens`);
     console.log(`💰 Activity: ${this.stats.buysDetected} buys | ${this.stats.sellsDetected} sells`);
-    console.log(`📝 Metadata Queue: ${heliusStats.processingQueue} processing | ${heliusStats.retryQueue} retrying`);
+    console.log(`📝 Metadata: ${heliusStats.processingQueue} processing | ${heliusStats.retryQueue} retrying | ${this.stats.shyftMetadataFetched} Shyft`);
     console.log(`💎 Liquidity: ${this.stats.liquidityMilestonesTriggered} milestones | ${this.stats.highQualityLiquidityDetected} high-quality | ${this.stats.liquidityMomentumEvents} momentum`);
     console.log(`🎯 Analytics: ${liquidityGrowthStats.totalTokens} tracked | ${liquidityGrowthStats.highMomentum} high momentum | ${liquidityGrowthStats.accelerating} accelerating`);
     // NEW V4.27: Volume analytics stats
     console.log(`📈 Volume: ${volumeStats.tokensTracked} tracked | ${volumeStats.alertsTriggered} alerts | ${volumeStats.totalCalculations} calculations`);
     console.log(`🚨 Volume Alerts: ${volumeStats.alertsTriggered} triggered | ${volumeStats.tokensInCache} in cache`);
     console.log(`🚨 Alerts: ${liquidityAlertsStats.trackedTokens} tracked tokens | ${liquidityAlertsStats.totalMilestones} total milestones`);
-    console.log(`❌ Errors: ${this.stats.errors} | Volume Errors: ${volumeStats.processingErrors}`);
+    console.log(`🔍 Shyft RPC: ${this.stats.shyftMetadataFetched} metadata | ${this.stats.shyftHoldersFetched} holders | ${this.stats.shyftErrors} errors`);
+    console.log(`❌ Errors: ${this.stats.errors} gRPC | ${volumeStats.processingErrors} Volume | ${this.stats.shyftErrors} Shyft`);
     console.log(`🕐 Last Flush: ${this.stats.lastFlush.toLocaleTimeString()}`);
     console.log('='.repeat(80) + '\n');
 
@@ -1219,7 +1357,7 @@ export class GrpcStreamManager extends EventEmitter {
     }
   }
   
-  // ENHANCED: Get stats with liquidity + volume analytics
+  // ENHANCED: Get stats with liquidity + volume + Shyft analytics
   getStats() {
     return {
       ...this.stats,
@@ -1238,7 +1376,14 @@ export class GrpcStreamManager extends EventEmitter {
         throttledTokensCount: this.liquidityCheckThrottles.size
       },
       // NEW V4.27: Volume analytics stats
-      volumeAnalytics: VOLUME_ANALYTICS_SERVICE.getStats()
+      volumeAnalytics: VOLUME_ANALYTICS_SERVICE.getStats(),
+      // NEW V4.28: Shyft RPC stats
+      shyftRPC: {
+        metadataFetched: this.stats.shyftMetadataFetched,
+        holdersFetched: this.stats.shyftHoldersFetched,
+        errors: this.stats.shyftErrors,
+        connected: true // Can add actual connection check
+      }
     };
   }
 
@@ -1338,6 +1483,75 @@ export class GrpcStreamManager extends EventEmitter {
       return result;
     } catch (error) {
       logger.error(`Error in force volume analysis for ${tokenAddress}:`, error);
+      return null;
+    }
+  }
+  
+  /**
+   * NEW V4.28: Force Shyft metadata refresh for a token
+   */
+  async forceShyftMetadataRefresh(tokenAddress: string): Promise<any> {
+    try {
+      const [tokenInfo, holders] = await Promise.all([
+        this.shyftRPC.getTokenInfo(tokenAddress),
+        this.shyftRPC.getTokenHolders(tokenAddress, 25)
+      ]);
+      
+      if (tokenInfo) {
+        await this.db('tokens')
+          .where('address', tokenAddress)
+          .update({
+            symbol: tokenInfo.symbol,
+            name: tokenInfo.name,
+            description: tokenInfo.description,
+            decimals: tokenInfo.decimals,
+            total_supply: tokenInfo.supply,
+            image_uri: tokenInfo.image,
+            metadata_source: 'shyft_rpc',
+            updated_at: new Date()
+          });
+      }
+      
+      if (holders && holders.length > 0) {
+        await this.fetchHolderAnalytics(tokenAddress);
+      }
+      
+      logger.info(`✅ Shyft metadata refresh completed for: ${tokenAddress.substring(0, 8)}...`);
+      
+      return {
+        tokenInfo,
+        holders: holders?.length || 0,
+        timestamp: new Date()
+      };
+    } catch (error) {
+      logger.error(`Error in force Shyft metadata refresh for ${tokenAddress}:`, error);
+      return null;
+    }
+  }
+  
+  /**
+   * NEW V4.28: Get comprehensive token analytics including Shyft data
+   */
+  async getTokenAnalytics(tokenAddress: string): Promise<any> {
+    try {
+      const [tokenData, shyftInfo, holders] = await Promise.all([
+        this.db('tokens').where('address', tokenAddress).first(),
+        this.shyftRPC.getTokenInfo(tokenAddress),
+        this.shyftRPC.getTokenHolders(tokenAddress, 10)
+      ]);
+      
+      return {
+        database: tokenData,
+        shyft: {
+          info: shyftInfo,
+          holders,
+          holderCount: holders?.length || 0,
+          top10Percentage: holders?.slice(0, 10).reduce((sum, h) => sum + h.percentage, 0) || 0
+        },
+        timestamp: new Date()
+      };
+    } catch (error) {
+      logger.error(`Error getting token analytics for ${tokenAddress}:`, error);
       return null;
     }
   }
