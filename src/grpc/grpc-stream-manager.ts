@@ -2,10 +2,11 @@
 
 import { YellowstoneGrpcClient, TokenPrice, TokenTransaction } from './yellowstone-grpc-client';
 import { Knex } from 'knex';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { config } from '../config';
 import { CategoryManager } from '../category/category-manager';
 import { BuySignalEvaluator } from '../trading/buy-signal-evaluator';
+import { EnhancedYellowstoneClient } from './enhanced-yellowstone-client';
 const { HELIUS_METADATA_SERVICE } = require('../services/multi-source-metadata-service');
 import { EventEmitter } from 'events';
 
@@ -100,13 +101,12 @@ export class GrpcStreamManager extends EventEmitter {
     this.buySignalEvaluator = buySignalEvaluator;
     
     this.grpcClient = new YellowstoneGrpcClient({
-      endpoint: this.config.grpcEndpoint,
-      token: this.config.grpcToken
+      endpoint: config.grpcEndpoint,
+      token: config.grpcToken
     });
-    
+  
     this.setupEventHandlers();
     this.setupLiquidityEventHandlers();
-    // NEW V4.27: Setup volume analytics event handlers
     this.setupVolumeAnalyticsEventHandlers();
   }
   

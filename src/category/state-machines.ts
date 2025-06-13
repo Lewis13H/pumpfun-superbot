@@ -1,5 +1,5 @@
 import { createMachine, assign } from 'xstate';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 
 // Market cap thresholds
 export const MARKET_CAP_THRESHOLDS = {

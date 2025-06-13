@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { interpret, Interpreter, State } from 'xstate';
 import { db } from  '../database/postgres';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger2';
 import { 
   createTokenCategoryMachine, 
   determineCategoryFromMarketCap,

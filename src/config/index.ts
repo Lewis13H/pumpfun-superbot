@@ -79,7 +79,7 @@ export const config: Config = {
   
   // gRPC Configuration - ensure endpoint has protocol
   GRPC_ENDPOINT: ensureProtocol(process.env.GRPC_ENDPOINT || 'grpc.ams.shyft.to'),
-  GRPC_TOKEN: process.env.GRPC_TOKEN || '0b63e431-3145-4101-ac9d-68f8b33ded4b',
+  GRPC_TOKEN: process.env.GRPC_TOKEN || '',
   GRPC_BATCH_SIZE: parseInt(process.env.GRPC_BATCH_SIZE || '1000'),
   GRPC_FLUSH_INTERVAL: parseInt(process.env.GRPC_FLUSH_INTERVAL || '1000'),
   

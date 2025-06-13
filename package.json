@@ -89,12 +89,13 @@
     "node-cron": "^4.1.0",
     "node-fetch": "^3.3.2",
     "p-queue": "^8.1.0",
-    "pg": "^8.11.3",
+    "pg": "^8.16.0",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
     "websocket": "^1.0.35",
     "winston": "^3.11.0",
     "ws": "^8.18.2",
+    "xlsx": "^0.18.5",
     "xstate": "^4.38.3"
   },
   "devDependencies": {
